@@ -1,0 +1,97 @@
+name: NovaBridge Cloud Build (Android)
+
+on:
+  # This is triggered by the Worker via repository_dispatch
+  repository_dispatch:
+    types: [novabridge_android_build]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Load payload from repository_dispatch
+        run: |
+          echo "BUILD_ID=${{ github.event.client_payload.buildId }}" >> $GITHUB_ENV
+          echo "ZIP_URL=${{ github.event.client_payload.zipUrl }}" >> $GITHUB_ENV
+          echo "CALLBACK_URL=${{ github.event.client_payload.callbackUrl }}" >> $GITHUB_ENV
+
+      - name: Show payload (debug)
+        run: |
+          echo "Build ID: $BUILD_ID"
+          echo "ZIP URL: $ZIP_URL"
+          echo "Callback URL: $CALLBACK_URL"
+
+      - name: Download native ZIP from Worker
+        run: |
+          curl -L "$ZIP_URL" -o project.zip
+          mkdir app
+          unzip project.zip -d app
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Build Android APK with Gradle
+        run: |
+          cd app/android
+          chmod +x gradlew || true
+          ./gradlew assembleRelease
+
+      - name: Install AWS CLI for R2 upload
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y awscli
+          aws --version
+
+      - name: Configure AWS env for Cloudflare R2
+        run: |
+          echo "AWS_ACCESS_KEY_ID=${{ secrets.R2_ACCESS_KEY_ID }}" >> $GITHUB_ENV
+          echo "AWS_SECRET_ACCESS_KEY=${{ secrets.R2_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
+          echo "AWS_DEFAULT_REGION=auto" >> $GITHUB_ENV
+
+      - name: Upload APK to R2
+        run: |
+          APK_PATH="app/android/app/build/outputs/apk/release/app-release.apk"
+          if [ ! -f "$APK_PATH" ]; then
+            echo "❌ APK not found at $APK_PATH"
+            ls -R
+            exit 1
+          fi
+
+          BUCKET="${{ secrets.R2_BUCKET }}"
+          ACCOUNT="${{ secrets.R2_ACCOUNT_ID }}"
+          KEY="artifacts/$BUILD_ID/app-release.apk"
+          ENDPOINT="https://$ACCOUNT.r2.cloudflarestorage.com"
+
+          echo "Uploading $APK_PATH to s3://$BUCKET/$KEY via $ENDPOINT"
+          aws s3 cp "$APK_PATH" "s3://$BUCKET/$KEY" --endpoint-url "$ENDPOINT"
+
+          PUBLIC_URL="https://$BUCKET.$ACCOUNT.r2.cloudflarestorage.com/$KEY"
+          echo "PUBLIC_URL=$PUBLIC_URL" >> $GITHUB_ENV
+
+      - name: Notify NovaBridge (success)
+        if: success()
+        run: |
+          curl -s -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"buildId\": \"${BUILD_ID}\",
+              \"status\": \"success\",
+              \"message\": \"APK build + upload successful\",
+              \"artifactKey\": \"artifacts/${BUILD_ID}/app-release.apk\",
+              \"artifactUrl\": \"${PUBLIC_URL}\"
+            }"
+
+      - name: Notify NovaBridge (failure)
+        if: failure()
+        run: |
+          curl -s -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"buildId\": \"${BUILD_ID}\",
+              \"status\": \"failed\",
+              \"message\": \"GitHub Actions Android build failed\"
+            }"
