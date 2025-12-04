@@ -26,6 +26,7 @@ jobs:
       - name: Extract ZIP
         run: |
           unzip build/source.zip -d build/project
+          ls -R build/project
 
       - name: Setup JDK
         uses: actions/setup-java@v3
@@ -33,10 +34,14 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: Setup Gradle
+        uses: gradle/gradle-build-action@v2
+
       - name: Build APK
         run: |
           cd build/project
-          ./gradlew assembleRelease || ./gradlew assembleDebug
+          # Our "gradlew" is a small shell script that delegates to Gradle
+          sh ./gradlew assembleRelease || sh ./gradlew assembleDebug
 
       - name: Find APK
         id: find_apk
