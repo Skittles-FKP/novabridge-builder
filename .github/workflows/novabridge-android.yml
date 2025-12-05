@@ -9,57 +9,147 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v3
+      # ------------------------------------------------------
+      # 1) CHECKOUT REPO
+      # ------------------------------------------------------
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-      - name: Load client payload
+      # ------------------------------------------------------
+      # 2) LOAD PAYLOAD FROM REPOSITORY_DISPATCH
+      # ------------------------------------------------------
+      - name: Load Build Payload
+        id: payload
         run: |
           echo "BUILD_ID=${{ github.event.client_payload.buildId }}" >> $GITHUB_ENV
           echo "ZIP_URL=${{ github.event.client_payload.zipUrl }}" >> $GITHUB_ENV
-          echo "CALLBACK_URL=${{ github.event.client_payload.callbackUrl }}" >> $GITHUB_ENV
 
+      - name: Verify Payload
+        run: |
+          echo "BUILD ID: $BUILD_ID"
+          echo "ZIP URL: $ZIP_URL"
+
+      # ------------------------------------------------------
+      # 3) DOWNLOAD ZIP FROM WORKER
+      # ------------------------------------------------------
       - name: Download ZIP
         run: |
           mkdir -p build
+          echo "Downloading ZIP from: $ZIP_URL"
           curl -L "$ZIP_URL" -o build/source.zip
 
+      # ------------------------------------------------------
+      # 4) EXTRACT ZIP
+      # ------------------------------------------------------
       - name: Extract ZIP
         run: |
           unzip build/source.zip -d build/project
+          echo "Project tree:"
           ls -R build/project
 
-      - name: Setup JDK
-        uses: actions/setup-java@v3
+      # ------------------------------------------------------
+      # 5) SETUP JAVA 17
+      # ------------------------------------------------------
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Gradle
-        uses: gradle/gradle-build-action@v2
-
-      - name: Build APK
+      # ------------------------------------------------------
+      # 6) PREPARE GRADLE WRAPPER
+      # ------------------------------------------------------
+      - name: Prepare Gradle Wrapper
         run: |
           cd build/project
-          # Our "gradlew" is a small shell script that delegates to Gradle
-          sh ./gradlew assembleRelease || sh ./gradlew assembleDebug
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+            echo "✅ gradlew found and made executable."
+          else
+            echo "❌ gradlew NOT found in build/project. Check ZIP contents."
+            exit 1
+          fi
 
+      # ------------------------------------------------------
+      # 7) BUILD ANDROID APK
+      # ------------------------------------------------------
+      - name: Build Android APK
+        run: |
+          cd build/project
+          echo "🏗 Running Gradle build..."
+          ./gradlew assembleRelease --stacktrace || ./gradlew assembleDebug --stacktrace
+
+      # ------------------------------------------------------
+      # 8) FIND BUILT APK
+      # ------------------------------------------------------
       - name: Find APK
         id: find_apk
         run: |
-          APK=$(find build -name "*.apk" | head -n 1)
-          echo "APK_PATH=$APK" >> $GITHUB_ENV
+          cd build/project
+          APK_PATH=$(find . -name "*.apk" | head -n 1)
+          if [ -z "$APK_PATH" ]; then
+            echo "❌ No APK found after build."
+            exit 1
+          fi
+          echo "✅ Found APK at: $APK_PATH"
+          echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
 
+      # ------------------------------------------------------
+      # 9) UPLOAD APK TO CLOUDFLARE R2
+      # ------------------------------------------------------
       - name: Upload APK to R2
         run: |
-          aws configure set aws_access_key_id ${{ secrets.R2_ACCESS_KEY_ID }}
-          aws configure set aws_secret_access_key ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          aws configure set default.region auto
-          aws s3 cp "$APK_PATH" \
-            "s3://${{ secrets.R2_BUCKET }}/artifacts/${{ env.BUILD_ID }}/app-release.apk" \
+          echo "🔐 Configuring AWS CLI for R2..."
+          aws configure set aws_access_key_id "${{ secrets.R2_ACCESS_KEY_ID }}"
+          aws configure set aws_secret_access_key "${{ secrets.R2_SECRET_ACCESS_KEY }}"
+          aws configure set default.region "auto"
+
+          echo "☁ Uploading APK to R2..."
+          aws s3 cp "build/project/$APK_PATH" \
+            "s3://${{ secrets.R2_BUCKET }}/artifacts/$BUILD_ID/app-release.apk" \
             --endpoint-url "https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
 
-      - name: Notify Worker Callback
+          echo "✅ Upload complete."
+
+      # ------------------------------------------------------
+      # 10) NOTIFY WORKER (SUCCESS)
+      # ------------------------------------------------------
+      - name: Notify Worker Callback (success)
+        if: success()
         run: |
-          curl -X POST -H "Content-Type: application/json" \
-            -d "{\"buildId\":\"${BUILD_ID}\",\"status\":\"success\",\"artifactUrl\":\"https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com/${{ secrets.R2_BUCKET }}/artifacts/${BUILD_ID}/app-release.apk\"}" \
+          CALLBACK_URL="https://novabridge-build-worker.novabridge.workers.dev/api/builds/callback"
+          ARTIFACT_URL="https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com/${{ secrets.R2_BUCKET }}/artifacts/$BUILD_ID/app-release.apk"
+
+          JSON_PAYLOAD=$(cat <<EOF
+          {"buildId":"$BUILD_ID","status":"success","artifactUrl":"$ARTIFACT_URL"}
+          EOF
+          )
+
+          echo "📡 Calling callback (success)..."
+          echo "Payload: $JSON_PAYLOAD"
+
+          curl -X POST \
+            -H "Content-Type: application/json" \
+            -d "$JSON_PAYLOAD" \
+            "$CALLBACK_URL"
+
+      # ------------------------------------------------------
+      # 11) NOTIFY WORKER (FAILURE)
+      # ------------------------------------------------------
+      - name: Notify Worker Callback (failure)
+        if: failure()
+        run: |
+          CALLBACK_URL="https://novabridge-build-worker.novabridge.workers.dev/api/builds/callback"
+
+          JSON_PAYLOAD=$(cat <<EOF
+          {"buildId":"$BUILD_ID","status":"error","message":"GitHub Actions build failed"}
+          EOF
+          )
+
+          echo "📡 Calling callback (failure)..."
+          echo "Payload: $JSON_PAYLOAD"
+
+          curl -X POST \
+            -H "Content-Type: application/json" \
+            -d "$JSON_PAYLOAD" \
             "$CALLBACK_URL"
