@@ -44,7 +44,7 @@ jobs:
       - name: Extract ZIP
         run: |
           unzip build/source.zip -d build/project
-          echo "Project tree:"
+          echo "Project tree under build/project:"
           ls -R build/project
 
       # ------------------------------------------------------
@@ -57,27 +57,21 @@ jobs:
           java-version: '17'
 
       # ------------------------------------------------------
-      # 6) PREPARE GRADLE WRAPPER
+      # 6) SETUP GRADLE (SYSTEM GRADLE, NO ./gradlew)
       # ------------------------------------------------------
-      - name: Prepare Gradle Wrapper
-        run: |
-          cd build/project
-          if [ -f "./gradlew" ]; then
-            chmod +x ./gradlew
-            echo "✅ gradlew found and made executable."
-          else
-            echo "❌ gradlew NOT found in build/project. Check ZIP contents."
-            exit 1
-          fi
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 9.2.1
 
       # ------------------------------------------------------
-      # 7) BUILD ANDROID APK
+      # 7) BUILD ANDROID APK USING GRADLE
       # ------------------------------------------------------
       - name: Build Android APK
         run: |
           cd build/project
-          echo "🏗 Running Gradle build..."
-          ./gradlew assembleRelease --stacktrace || ./gradlew assembleDebug --stacktrace
+          echo "🏗 Running Gradle build with system Gradle..."
+          gradle :app:assembleRelease --stacktrace || gradle :app:assembleDebug --stacktrace
 
       # ------------------------------------------------------
       # 8) FIND BUILT APK
@@ -85,8 +79,8 @@ jobs:
       - name: Find APK
         id: find_apk
         run: |
-          cd build/project
-          APK_PATH=$(find . -name "*.apk" | head -n 1)
+          echo "🔎 Searching for APK under build/project..."
+          APK_PATH=$(find build/project -name "*.apk" | head -n 1)
           if [ -z "$APK_PATH" ]; then
             echo "❌ No APK found after build."
             exit 1
@@ -105,14 +99,14 @@ jobs:
           aws configure set default.region "auto"
 
           echo "☁ Uploading APK to R2..."
-          aws s3 cp "build/project/$APK_PATH" \
+          aws s3 cp "$APK_PATH" \
             "s3://${{ secrets.R2_BUCKET }}/artifacts/$BUILD_ID/app-release.apk" \
             --endpoint-url "https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
 
-          echo "✅ Upload complete."
+          echo "✅ Upload to R2 complete."
 
       # ------------------------------------------------------
-      # 10) NOTIFY WORKER (SUCCESS)
+      # 10) NOTIFY WORKER CALLBACK (SUCCESS)
       # ------------------------------------------------------
       - name: Notify Worker Callback (success)
         if: success()
@@ -134,7 +128,7 @@ jobs:
             "$CALLBACK_URL"
 
       # ------------------------------------------------------
-      # 11) NOTIFY WORKER (FAILURE)
+      # 11) NOTIFY WORKER CALLBACK (FAILURE)
       # ------------------------------------------------------
       - name: Notify Worker Callback (failure)
         if: failure()
@@ -142,7 +136,7 @@ jobs:
           CALLBACK_URL="https://novabridge-build-worker.novabridge.workers.dev/api/builds/callback"
 
           JSON_PAYLOAD=$(cat <<EOF
-          {"buildId":"$BUILD_ID","status":"error","message":"GitHub Actions build failed"}
+          {"buildId":"$BUILD_ID","status":"error","message":"GitHub Actions Gradle build failed"}
           EOF
           )
 
