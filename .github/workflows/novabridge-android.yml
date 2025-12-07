@@ -1,7 +1,6 @@
-name: novabridge cloud build (android)
+name: NovaBridge Cloud Build (Android)
 
 on:
-  # Triggered by the Worker via repository_dispatch
   repository_dispatch:
     types: [novabridge_android_build]
 
@@ -13,27 +12,30 @@ jobs:
       BUILD_ID: ${{ github.event.client_payload.buildId }}
       ZIP_URL: ${{ github.event.client_payload.zipUrl }}
       CALLBACK_URL: ${{ github.event.client_payload.callbackUrl }}
+      PROGRESS_URL: ${{ github.event.client_payload.progressUrl }}
 
     steps:
+      # ----------------------------------------------------------
+      # 1) Checkout
+      # ----------------------------------------------------------
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # ----------------------------------------------------------
-      # Tell Worker: GitHub job has started
-      # ----------------------------------------------------------
-      - name: Notify Worker – running
+      - name: Show payload
         run: |
-          echo "Notifying Worker that build is running..."
-          curl -X POST "$CALLBACK_URL" \
+          echo "BUILD_ID=$BUILD_ID"
+          echo "ZIP_URL=$ZIP_URL"
+          echo "CALLBACK_URL=$CALLBACK_URL"
+          echo "PROGRESS_URL=$PROGRESS_URL"
+
+      - name: Notify progress – Preparing environment (5%)
+        run: |
+          curl -s -X POST "$PROGRESS_URL" \
             -H "Content-Type: application/json" \
-            -d "$(jq -n \
-                  --arg id "$BUILD_ID" \
-                  --arg st "running" \
-                  --arg msg "GitHub Actions job started" \
-                  '{buildId:$id, status:$st, message:$msg}')"
+            -d "{\"buildId\":\"$BUILD_ID\",\"step\":\"Preparing environment\",\"progress\":5,\"status\":\"running\"}" || true
 
       # ----------------------------------------------------------
-      # Download ZIP that Worker generated (Android project)
+      # 2) Download ZIP from Worker
       # ----------------------------------------------------------
       - name: Download ZIP from Worker
         run: |
@@ -41,67 +43,133 @@ jobs:
           echo "Downloading ZIP from $ZIP_URL"
           curl -L "$ZIP_URL" -o build/project.zip
 
-      - name: Unzip Android project (root = project/)
+      - name: Notify progress – Generating native project (20%)
+        run: |
+          curl -s -X POST "$PROGRESS_URL" \
+            -H "Content-Type: application/json" \
+            -d "{\"buildId\":\"$BUILD_ID\",\"step\":\"Unzipping native project\",\"progress\":20,\"status\":\"running\"}" || true
+
+      # ----------------------------------------------------------
+      # 3) Unzip Android project (root = project/)
+      # ----------------------------------------------------------
+      - name: Unzip Android project
         run: |
           mkdir -p build/project
           unzip -o build/project.zip -d build/project
-          echo "Project tree:"
           ls -R build/project
 
       # ----------------------------------------------------------
-      # Java / Gradle setup
+      # 4) JDK 17
       # ----------------------------------------------------------
       - name: Set up JDK 17
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: Run Gradle assembleRelease
+      # ----------------------------------------------------------
+      # 5) Ensure Gradle wrapper = 8.7 (AGP 8.2.2 compatible)
+      # ----------------------------------------------------------
+      - name: Ensure Gradle wrapper 8.7
         run: |
           cd build/project
-          echo "🏗 Running Gradle assembleRelease..."
-          gradle assembleRelease
+          if [ ! -f "./gradlew" ]; then
+            echo "gradlew not found, generating wrapper with Gradle 8.7..."
+            # Use system gradle just to generate wrapper
+            gradle wrapper --gradle-version 8.7 || ./gradlew wrapper --gradle-version 8.7 || true
+          fi
+          chmod +x ./gradlew
+          ls
+
+      - name: Notify progress – Running Gradle assembleRelease (40%)
+        run: |
+          curl -s -X POST "$PROGRESS_URL" \
+            -H "Content-Type: application/json" \
+            -d "{\"buildId\":\"$BUILD_ID\",\"step\":\"Running Gradle assembleRelease\",\"progress\":40,\"status\":\"running\"}" || true
 
       # ----------------------------------------------------------
-      # Find built APK
+      # 6) Build Release APK with Gradle wrapper (8.7)
+      # ----------------------------------------------------------
+      - name: Build Release APK
+        run: |
+          cd build/project
+          echo "🏗 Running ./gradlew assembleRelease (Gradle 8.7)..."
+          ./gradlew assembleRelease --stacktrace
+
+      # If Gradle fails, mark progress as error
+      - name: Notify progress – Gradle failed
+        if: failure()
+        run: |
+          curl -s -X POST "$PROGRESS_URL" \
+            -H "Content-Type: application/json" \
+            -d "{\"buildId\":\"$BUILD_ID\",\"step\":\"Gradle build failed\",\"progress\":40,\"status\":\"error\"}" || true
+
+      # ----------------------------------------------------------
+      # 7) Find APK
       # ----------------------------------------------------------
       - name: Find APK
         id: find_apk
         run: |
-          APK_PATH=$(find build/project -name "*.apk" | head -n 1 || true)
-          echo "APK_PATH=$APK_PATH"
+          cd build/project
+          APK_PATH=$(find . -name "*.apk" | head -n 1)
+          echo "Found APK: $APK_PATH"
           echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
 
-      # ----------------------------------------------------------
-      # Notify Worker on SUCCESS (APK built)
-      # ----------------------------------------------------------
-      - name: Notify Worker – success
+      - name: Notify progress – Packaging artifact (80%)
         if: env.APK_PATH != ''
         run: |
-          echo "Notifying Worker of success..."
-          # Later you can replace this with a real public URL
-          ARTIFACT_URL="file://$APK_PATH"
-          curl -X POST "$CALLBACK_URL" \
+          curl -s -X POST "$PROGRESS_URL" \
             -H "Content-Type: application/json" \
-            -d "$(jq -n \
-                  --arg id "$BUILD_ID" \
-                  --arg st "success" \
-                  --arg url "$ARTIFACT_URL" \
-                  --arg msg "Android APK built successfully." \
-                  '{buildId:$id, status:$st, artifactUrl:$url, message:$msg}')"
+            -d "{\"buildId\":\"$BUILD_ID\",\"step\":\"Packaging APK\",\"progress\":80,\"status\":\"running\"}" || true
 
       # ----------------------------------------------------------
-      # Notify Worker on FAILURE (any step fails)
+      # 8) Upload APK as GitHub artifact (optional)
       # ----------------------------------------------------------
-      - name: Notify Worker – failed
-        if: failure()
+      - name: Upload APK as GitHub artifact
+        if: env.APK_PATH != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: novabridge-android-apk-${{ env.BUILD_ID }}
+          path: ${{ env.APK_PATH }}
+
+      # ----------------------------------------------------------
+      # 9) Notify Worker callback (success)
+      # ----------------------------------------------------------
+      - name: Notify NovaBridge Worker callback (success)
+        if: env.APK_PATH != ''
         run: |
-          echo "Notifying Worker of failure..."
-          curl -X POST "$CALLBACK_URL" \
+          MSG="APK built and uploaded as GitHub artifact: novabridge-android-apk-${BUILD_ID}"
+          PAYLOAD=$(jq -n \
+            --arg id "$BUILD_ID" \
+            --arg url "" \
+            --arg msg "$MSG" \
+            '{buildId: $id, status: "success", artifactUrl: $url, message: $msg}')
+          echo "Sending callback payload: $PAYLOAD"
+          curl -s -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
-            -d "$(jq -n \
-                  --arg id "$BUILD_ID" \
-                  --arg st "failed" \
-                  --arg msg "GitHub Actions build failed – check GitHub logs." \
-                  '{buildId:$id, status:$st, message:$msg}')"
+            -d "$PAYLOAD" || true
+
+          # Also mark progress complete
+          curl -s -X POST "$PROGRESS_URL" \
+            -H "Content-Type: application/json" \
+            -d "{\"buildId\":\"$BUILD_ID\",\"step\":\"Build complete\",\"progress\":100,\"status\":\"success\"}" || true
+
+      # ----------------------------------------------------------
+      # 10) If no APK was found, notify error
+      # ----------------------------------------------------------
+      - name: Notify NovaBridge Worker callback (no APK)
+        if: env.APK_PATH == ''
+        run: |
+          MSG="Build finished but no APK was found in the project directory."
+          PAYLOAD=$(jq -n \
+            --arg id "$BUILD_ID" \
+            --arg msg "$MSG" \
+            '{buildId: $id, status: "error", artifactUrl: null, message: $msg}')
+          echo "Sending error callback payload: $PAYLOAD"
+          curl -s -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" || true
+
+          curl -s -X POST "$PROGRESS_URL" \
+            -H "Content-Type: application/json" \
+            -d "{\"buildId\":\"$BUILD_ID\",\"step\":\"Build finished but no APK found\",\"progress\":40,\"status\":\"error\"}" || true
