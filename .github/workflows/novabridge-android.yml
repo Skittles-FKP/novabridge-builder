@@ -1,4 +1,4 @@
-name: NovaBridge Cloud Build (Android)
+name: NovaBridge Cloud Android Build
 
 on:
   repository_dispatch:
@@ -14,8 +14,8 @@ jobs:
       CALLBACK_URL: ${{ github.event.client_payload.callbackUrl }}
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Show payload
         run: |
@@ -23,92 +23,194 @@ jobs:
           echo "ZIP_URL=$ZIP_URL"
           echo "CALLBACK_URL=$CALLBACK_URL"
 
-      - name: Notify Worker – preparing environment
+      # ---- Progress: workflow started ----
+      - name: Notify Worker – job started
         run: |
-          curl -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -d '{"stage":"prepare"}'
+          if [ -z "$CALLBACK_URL" ]; then
+            echo "No CALLBACK_URL provided, skipping callback."
+            exit 0
+          fi
 
+          echo "Notifying worker: started"
+          curl -sS -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg id "$BUILD_ID" \
+              --arg status "started" \
+              --arg msg "GitHub Actions workflow started" \
+              '{buildId:$id,status:$status,message:$msg}')"
+
+      # ---- Download ZIP from Build Worker ----
       - name: Download ZIP from Worker
         run: |
+          if [ -z "$ZIP_URL" ]; then
+            echo "❌ ZIP_URL is empty, cannot continue."
+            exit 1
+          fi
+
           mkdir -p build
           echo "Downloading ZIP from $ZIP_URL"
           curl -L "$ZIP_URL" -o build/project.zip
+          ls -lh build
 
-      - name: Notify Worker – extracting project
+      # ---- Progress: downloaded ZIP ----
+      - name: Notify Worker – ZIP downloaded
         run: |
-          curl -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -d '{"stage":"extract"}'
+          if [ -z "$CALLBACK_URL" ]; then
+            echo "No CALLBACK_URL provided, skipping callback."
+            exit 0
+          fi
 
+          echo "Notifying worker: downloading_zip"
+          curl -sS -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg id "$BUILD_ID" \
+              --arg status "downloading_zip" \
+              --arg msg "ZIP downloaded from Build Worker" \
+              '{buildId:$id,status:$status,message:$msg}')"
+
+      # ---- Unzip Android project into build/ ----
       - name: Unzip Android project
         run: |
-          mkdir -p build
-          unzip -o build/project.zip -d build
-          echo "--- PROJECT STRUCTURE ---"
-          ls -R build
+          cd build
+          echo "Unzipping project.zip into ./build"
+          unzip -o project.zip
+          echo "Contents of build/:"
+          ls -R .
 
-      # 🔥 Golden Milestone Fix:
-      # Auto-detect correct project root
+      # ---- Progress: unzipped ----
+      - name: Notify Worker – unzipped project
+        run: |
+          if [ -z "$CALLBACK_URL" ]; then
+            echo "No CALLBACK_URL provided, skipping callback."
+            exit 0
+          fi
+
+          echo "Notifying worker: unzipping"
+          curl -sS -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg id "$BUILD_ID" \
+              --arg status "unzipping" \
+              --arg msg "Android project unzipped into build/" \
+              '{buildId:$id,status:$status,message:$msg}')"
+
+      # ---- Detect Android project root via settings.gradle ----
       - name: Detect Android project root
         id: detect_root
         run: |
-          echo "Detecting Android project root..."
-          ROOT=$(find build -maxdepth 4 -name "AndroidManifest.xml" -printf '%h\n' | head -n 1)
+          echo "Detecting Android project root (settings.gradle)..."
+          ROOT=$(find build -maxdepth 2 -name "settings.gradle" -printf '%h\n' | head -n 1 || true)
+
           if [ -z "$ROOT" ]; then
-            echo "❌ ERROR: Could not find Android project root"
+            echo "❌ ERROR: Could not find settings.gradle under build/"
+            ls -R build || true
             exit 1
           fi
-          echo "ROOT=$ROOT" >> $GITHUB_ENV
+
           echo "Detected ROOT: $ROOT"
+          echo "ROOT=$ROOT" >> $GITHUB_ENV
 
-      - name: Notify Worker – running build tasks
+      # ---- Progress: root detected ----
+      - name: Notify Worker – root detected
         run: |
-          curl -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -d '{"stage":"build"}'
+          if [ -z "$CALLBACK_URL" ]; then
+            echo "No CALLBACK_URL provided, skipping callback."
+            exit 0
+          fi
 
+          echo "Notifying worker: detecting_root"
+          curl -sS -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg id "$BUILD_ID" \
+              --arg status "detecting_root" \
+              --arg msg "Gradle project root detected at $ROOT" \
+              '{buildId:$id,status:$status,message:$msg}')"
+
+      # ---- Set up JDK 17 ----
       - name: Set up JDK 17
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: Build Release APK (system Gradle)
+      # ---- Progress: running Gradle ----
+      - name: Notify Worker – running Gradle
         run: |
-          echo "Using root: $ROOT"
+          if [ -z "$CALLBACK_URL" ]; then
+            echo "No CALLBACK_URL provided, skipping callback."
+            exit 0
+          fi
+
+          echo "Notifying worker: building"
+          curl -sS -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg id "$BUILD_ID" \
+              --arg status "building" \
+              --arg msg "Running Gradle assembleRelease" \
+              '{buildId:$id,status:$status,message:$msg}')"
+
+      # ---- Build Release APK with system Gradle ----
+      - name: Build Release APK with system Gradle
+        run: |
+          echo "Using ROOT: $ROOT"
           cd "$ROOT"
           echo "🏗 Running Gradle assembleRelease with system Gradle..."
-          gradle assembleRelease --warning-mode all
+          gradle assembleRelease --no-daemon --warning-mode all
 
-      - name: Find APK
+      # ---- Find built APK ----
+      - name: Find built APK
         id: find_apk
         run: |
-          APK=$(find build -name "*.apk" | head -n 1)
-          if [ -z "$APK" ]; then
-            echo "❌ No APK found"
+          echo "Searching for APK under $ROOT..."
+          APK_PATH=$(find "$ROOT" -type f -name "*.apk" | head -n 1 || true)
+
+          if [ -z "$APK_PATH" ]; then
+            echo "❌ No APK found after build"
             exit 1
           fi
-          echo "APK=$APK" >> $GITHUB_ENV
-          echo "Found APK at: $APK"
 
-      - name: Notify Worker – packaging completed
+          echo "Found APK at: $APK_PATH"
+          echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
+
+      # ---- Progress: success ----
+      - name: Notify Worker – build success
+        if: success()
         run: |
-          curl -X POST "$CALLBACK_URL" \
+          if [ -z "$CALLBACK_URL" ]; then
+            echo "No CALLBACK_URL provided, skipping callback."
+            exit 0
+          fi
+
+          echo "Notifying worker: success"
+          curl -sS -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
-            -d '{"stage":"package"}'
+            -d "$(jq -n \
+              --arg id "$BUILD_ID" \
+              --arg status "success" \
+              --arg msg "Android build completed successfully" \
+              --arg apk "$APK_PATH" \
+              '{buildId:$id,status:$status,message:$msg,artifactUrl:$apk}')"
 
-      - name: Notify Worker – upload result
+      # ---- Progress: failure ----
+      - name: Notify Worker – build failed
+        if: failure()
         run: |
-          PAYLOAD=$(jq -n \
-            --arg id "$BUILD_ID" \
-            --arg apk "$APK" \
-            '{buildId: $id, status: "success", artifactPath: $apk}')
-          
-          curl -X POST "$CALLBACK_URL" \
+          if [ -z "$CALLBACK_URL" ]; then
+            echo "No CALLBACK_URL provided, skipping callback."
+            exit 0
+          fi
+
+          MSG="GitHub Actions build failed – check workflow logs"
+          echo "Notifying worker: error – $MSG"
+
+          curl -sS -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
-            -d "$PAYLOAD"
-
-      - name: Final status
-        run: |
-          echo "Build finished successfully!"
+            -d "$(jq -n \
+              --arg id "$BUILD_ID" \
+              --arg status "error" \
+              --arg msg "$MSG" \
+              '{buildId:$id,status:$status,message:$msg}')"
