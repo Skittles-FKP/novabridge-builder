@@ -1,11 +1,11 @@
-name: NovaBridge Android Builder
+name: NovaBridge Cloud Build (Android)
 
 on:
   repository_dispatch:
     types: [novabridge_android_build]
 
 jobs:
-  android-build:
+  build-android:
     runs-on: ubuntu-latest
 
     env:
@@ -14,113 +14,101 @@ jobs:
       CALLBACK_URL: ${{ github.event.client_payload.callbackUrl }}
 
     steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
 
-    # ---------------------------------------------------------
-    # 0. Notify Worker: QUEUED
-    # ---------------------------------------------------------
-    - name: Notify worker (QUEUED)
-      run: |
-        curl -X POST "$CALLBACK_URL" \
-          -H "Content-Type: application/json" \
-          -d "{\"buildId\": \"$BUILD_ID\", \"status\": \"queued\", \"step\": \"PREPARING_ENV\", \"percent\": 0, \"log\": \"GitHub Actions job queued\"}"
+      - name: Show payload
+        run: |
+          echo "BUILD_ID=$BUILD_ID"
+          echo "ZIP_URL=$ZIP_URL"
+          echo "CALLBACK_URL=$CALLBACK_URL"
 
-    # ---------------------------------------------------------
-    # 1. Prepare environment
-    # ---------------------------------------------------------
-    - name: Set up JDK 17
-      uses: actions/setup-java@v4
-      with:
-        distribution: "temurin"
-        java-version: "17"
+      - name: Notify Worker – preparing environment
+        run: |
+          curl -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -d '{"stage":"prepare"}'
 
-    - name: Notify worker (PREPARING_ENV)
-      run: |
-        curl -X POST "$CALLBACK_URL" \
-          -H "Content-Type: application/json" \
-          -d "{\"buildId\": \"$BUILD_ID\", \"status\": \"running\", \"step\": \"PREPARING_ENV\", \"percent\": 10, \"log\": \"Java 17 and environment configured\"}"
+      - name: Download ZIP from Worker
+        run: |
+          mkdir -p build
+          echo "Downloading ZIP from $ZIP_URL"
+          curl -L "$ZIP_URL" -o build/project.zip
 
-    # ---------------------------------------------------------
-    # 2. Download ZIP from Worker R2
-    # ---------------------------------------------------------
-    - name: Download ZIP
-      run: |
-        mkdir -p build/project
-        curl -L "$ZIP_URL" -o project.zip
+      - name: Notify Worker – extracting project
+        run: |
+          curl -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -d '{"stage":"extract"}'
 
-    - name: Notify worker (GENERATING_PROJECT)
-      run: |
-        curl -X POST "$CALLBACK_URL" \
-          -H "Content-Type: application/json" \
-          -d "{\"buildId\": \"$BUILD_ID\", \"status\": \"running\", \"step\": \"GENERATING_PROJECT\", \"percent\": 20, \"log\": \"Project ZIP downloaded from Worker\"}"
+      - name: Unzip Android project
+        run: |
+          mkdir -p build
+          unzip -o build/project.zip -d build
+          echo "--- PROJECT STRUCTURE ---"
+          ls -R build
 
-    # ---------------------------------------------------------
-    # 3. Extract Android project
-    # ---------------------------------------------------------
-    - name: Extract project
-      run: |
-        unzip project.zip -d build/project
+      # 🔥 Golden Milestone Fix:
+      # Auto-detect correct project root
+      - name: Detect Android project root
+        id: detect_root
+        run: |
+          echo "Detecting Android project root..."
+          ROOT=$(find build -maxdepth 4 -name "AndroidManifest.xml" -printf '%h\n' | head -n 1)
+          if [ -z "$ROOT" ]; then
+            echo "❌ ERROR: Could not find Android project root"
+            exit 1
+          fi
+          echo "ROOT=$ROOT" >> $GITHUB_ENV
+          echo "Detected ROOT: $ROOT"
 
-    - name: Notify worker (UPLOADING_ZIP)
-      run: |
-        curl -X POST "$CALLBACK_URL" \
-          -H "Content-Type: application/json" \
-          -d "{\"buildId\": \"$BUILD_ID\", \"status\": \"running\", \"step\": \"UPLOADING_ZIP\", \"percent\": 35, \"log\": \"ZIP extracted to build/project\"}"
+      - name: Notify Worker – running build tasks
+        run: |
+          curl -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -d '{"stage":"build"}'
 
-    # ---------------------------------------------------------
-    # 4. Run Gradle Build
-    # ---------------------------------------------------------
-    - name: Grant permissions
-      run: |
-        chmod +x build/project/gradlew || true
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          distribution: temurin
+          java-version: "17"
 
-    - name: Build Release APK
-      working-directory: build/project
-      run: |
-        ./gradlew assembleRelease --warning-mode all
+      - name: Build Release APK (system Gradle)
+        run: |
+          echo "Using root: $ROOT"
+          cd "$ROOT"
+          echo "🏗 Running Gradle assembleRelease with system Gradle..."
+          gradle assembleRelease --warning-mode all
 
-    - name: Notify worker (RUNNING_BUILD_TASKS)
-      if: success()
-      run: |
-        curl -X POST "$CALLBACK_URL" \
-          -H "Content-Type: application/json" \
-          -d "{\"buildId\": \"$BUILD_ID\", \"status\": \"running\", \"step\": \"RUNNING_BUILD_TASKS\", \"percent\": 70, \"log\": \"Gradle assembleRelease completed\"}"
+      - name: Find APK
+        id: find_apk
+        run: |
+          APK=$(find build -name "*.apk" | head -n 1)
+          if [ -z "$APK" ]; then
+            echo "❌ No APK found"
+            exit 1
+          fi
+          echo "APK=$APK" >> $GITHUB_ENV
+          echo "Found APK at: $APK"
 
-    # If Gradle fails:
-    - name: Notify worker (ERROR)
-      if: failure()
-      run: |
-        ERR_MSG="Gradle build failed"
-        curl -X POST "$CALLBACK_URL" \
-          -H "Content-Type: application/json" \
-          -d "{\"buildId\": \"$BUILD_ID\", \"status\": \"error\", \"step\": \"RUNNING_BUILD_TASKS\", \"percent\": 0, \"log\": \"$ERR_MSG\", \"error\": \"$ERR_MSG\"}"
+      - name: Notify Worker – packaging completed
+        run: |
+          curl -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -d '{"stage":"package"}'
 
-    # ---------------------------------------------------------
-    # 5. Upload APK to GitHub as artifact
-    # ---------------------------------------------------------
-    - name: Find APK
-      id: apk
-      run: |
-        APK_PATH=$(find build/project/app/build/outputs/apk/release -name "*.apk" | head -n 1)
-        echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
+      - name: Notify Worker – upload result
+        run: |
+          PAYLOAD=$(jq -n \
+            --arg id "$BUILD_ID" \
+            --arg apk "$APK" \
+            '{buildId: $id, status: "success", artifactPath: $apk}')
+          
+          curl -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD"
 
-    - name: Upload APK Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: novabridge-apk-${{ env.BUILD_ID }}
-        path: ${{ steps.apk.outputs.apk_path }}
-
-    - name: Notify worker (PACKAGING_ARTIFACT)
-      run: |
-        curl -X POST "$CALLBACK_URL" \
-          -H "Content-Type: application/json" \
-          -d "{\"buildId\": \"$BUILD_ID\", \"status\": \"running\", \"step\": \"PACKAGING_ARTIFACT\", \"percent\": 85, \"log\": \"APK prepared and uploaded to GitHub artifacts\"}"
-
-    # ---------------------------------------------------------
-    # 6. FINAL CALLBACK → COMPLETE
-    # ---------------------------------------------------------
-    - name: Notify worker (COMPLETE)
-      run: |
-        ARTIFACT_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-        curl -X POST "$CALLBACK_URL" \
-          -H "Content-Type: application/json" \
-          -d "{\"buildId\": \"$BUILD_ID\", \"status\": \"success\", \"step\": \"COMPLETE\", \"percent\": 100, \"artifactUrl\": \"$ARTIFACT_URL\", \"log\": \"Build completed successfully\"}"
+      - name: Final status
+        run: |
+          echo "Build finished successfully!"
