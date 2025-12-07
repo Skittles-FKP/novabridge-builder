@@ -12,176 +12,86 @@ jobs:
       BUILD_ID: ${{ github.event.client_payload.buildId }}
       ZIP_URL: ${{ github.event.client_payload.zipUrl }}
       CALLBACK_URL: ${{ github.event.client_payload.callbackUrl }}
-      PROGRESS_URL: ${{ github.event.client_payload.progressUrl }}
-      GITHUB_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      # Small helper: function to send progress to the Worker
-      - name: Define progress helper
-        shell: bash
-        run: |
-          cat << 'EOF' > send_progress.sh
-          #!/usr/bin/env bash
-          BUILD_ID="$1"
-          STEP="$2"
-          STATUS="$3"
-          PROGRESS="$4"
-          MESSAGE="$5"
-
-          if [ -z "$PROGRESS_URL" ]; then
-            echo "No PROGRESS_URL configured, skipping progress ping"
-            exit 0
-          fi
-
-          echo ">>> Progress: [$PROGRESS%] $STEP ($STATUS) - $MESSAGE"
-
-          curl -sS -X POST "$PROGRESS_URL" \
-            -H "Content-Type: application/json" \
-            -d "$(node - << JS
-              const payload = {
-                buildId: "$BUILD_ID",
-                step: "$STEP",
-                status: "$STATUS",
-                progress: Number("$PROGRESS"),
-                message: "$MESSAGE"
-              };
-              process.stdout.write(JSON.stringify(payload));
-JS
-            )" >/dev/null 2>&1 || echo "Progress ping failed (ignored)"
-          EOF
-
-          chmod +x send_progress.sh
-
-      - name: Report progress – Preparing environment
-        shell: bash
-        run: |
-          ./send_progress.sh "$BUILD_ID" "Preparing Environment" "running" 5 "GitHub runner acquired"
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
       - name: Show payload
-        shell: bash
         run: |
           echo "BUILD_ID=$BUILD_ID"
           echo "ZIP_URL=$ZIP_URL"
           echo "CALLBACK_URL=$CALLBACK_URL"
-          echo "PROGRESS_URL=$PROGRESS_URL"
 
-      - name: Report progress – Downloading ZIP
-        shell: bash
+      - name: Notify Worker (10% Preparing Environment)
         run: |
-          ./send_progress.sh "$BUILD_ID" "Generating Native Project" "running" 15 "Downloading Android ZIP from Worker"
+          curl -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -d "{\"buildId\":\"$BUILD_ID\",\"progress\":10,\"step\":\"Preparing Environment\",\"status\":\"running\"}"
 
       - name: Download ZIP from Worker
-        shell: bash
         run: |
           mkdir -p build
-          echo "Downloading ZIP from $ZIP_URL"
+          echo "Downloading ZIP: $ZIP_URL"
           curl -L "$ZIP_URL" -o build/project.zip
 
-      - name: Report progress – Unzipping project
-        shell: bash
+      - name: Notify Worker (25% Unzipping Project)
         run: |
-          ./send_progress.sh "$BUILD_ID" "Generating Native Project" "running" 25 "Unzipping Android project"
+          curl -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -d "{\"buildId\":\"$BUILD_ID\",\"progress\":25,\"step\":\"Generating Native Project\",\"status\":\"running\"}"
 
       - name: Unzip Android project (root = project/)
-        shell: bash
         run: |
-          mkdir -p build/project
-          unzip -o build/project.zip -d build/project
-          ls -R build/project
-
-      - name: Report progress – Setting up JDK
-        shell: bash
-        run: |
-          ./send_progress.sh "$BUILD_ID" "Preparing Environment" "running" 35 "Setting up JDK 17"
+          unzip -o build/project.zip -d build
+          ls -R build
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v3
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: Report progress – Running Gradle build
-        shell: bash
+      - name: Notify Worker (40% Running Build Tasks)
         run: |
-          ./send_progress.sh "$BUILD_ID" "Running Build Tasks" "running" 50 "Running Gradle assembleRelease"
+          curl -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -d "{\"buildId\":\"$BUILD_ID\",\"progress\":40,\"step\":\"Running Build Tasks\",\"status\":\"running\"}"
 
       - name: Build Release APK with system Gradle
-        shell: bash
         run: |
           cd build/project
-          echo "🏗 Running Gradle assembleRelease..."
           gradle assembleRelease
 
-      - name: Report progress – Locating APK
-        if: success()
-        shell: bash
-        run: |
-          ./send_progress.sh "$BUILD_ID" "Packaging Artifact" "running" 75 "Locating built APK"
-
       - name: Find APK
-        if: success()
         id: find_apk
-        shell: bash
         run: |
-          APK_PATH=$(find build/project -name "*.apk" -print -quit)
+          APK_PATH=$(find build/project -name "*.apk" | head -n 1)
           echo "APK_PATH=$APK_PATH"
           echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
 
-      # OPTIONAL: Upload to R2 or GitHub artifacts – placeholder here
-      - name: Report progress – Uploading artifact (placeholder)
+      - name: Notify Worker (70% Packaging Artifact)
+        run: |
+          curl -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -d "{\"buildId\":\"$BUILD_ID\",\"progress\":70,\"step\":\"Packaging Artifact\",\"status\":\"running\"}"
+
+      - name: Upload artifact to GitHub (optional)
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-release-apk
+          path: ${{ env.APK_PATH }}
+
+      - name: Notify Worker (100% COMPLETE)
         if: env.APK_PATH != ''
-        shell: bash
         run: |
-          ./send_progress.sh "$BUILD_ID" "Uploading to R2" "running" 85 "APK located at $APK_PATH (upload step placeholder)"
-
-      # ---------- SUCCESS CALLBACK ----------
-      - name: Notify NovaBridge Worker callback (success)
-        if: success() && env.APK_PATH != ''
-        shell: bash
-        run: |
-          ARTIFACT_URL="$GITHUB_RUN_URL"  # You can replace with real R2 URL later
-
-          echo "Sending success callback to $CALLBACK_URL"
-          curl -sS -X POST "$CALLBACK_URL" \
+          curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
-            -d "$(node - << JS
-              const payload = {
-                buildId: "$BUILD_ID",
-                status: "success",
-                artifactUrl: "$ARTIFACT_URL",
-                step: "Build Complete",
-                progress: 100,
-                message: "Android build completed successfully"
-              };
-              process.stdout.write(JSON.stringify(payload));
-JS
-            )"
+            -d "{\"buildId\":\"$BUILD_ID\",\"progress\":100,\"step\":\"Build Complete\",\"status\":\"success\",\"artifactUrl\":\"${{ env.APK_PATH }}\"}"
 
-          ./send_progress.sh "$BUILD_ID" "Build Complete" "success" 100 "Android build completed successfully"
-
-      # ---------- FAILURE CALLBACK ----------
-      - name: Notify NovaBridge Worker callback (failure)
+      - name: Notify Worker (FAILED)
         if: failure()
-        shell: bash
         run: |
-          echo "Sending failure callback to $CALLBACK_URL"
-
-          curl -sS -X POST "$CALLBACK_URL" \
+          curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
-            -d "$(node - << JS
-              const payload = {
-                buildId: "$BUILD_ID",
-                status: "error",
-                artifactUrl: null,
-                step: "Build Failed",
-                progress: 100,
-                message: "GitHub Actions Android build failed"
-              };
-              process.stdout.write(JSON.stringify(payload));
-JS
-            )"
-
-          ./send_progress.sh "$BUILD_ID" "Build Failed" "error" 100 "GitHub Actions Android build failed"
+            -d "{\"buildId\":\"$BUILD_ID\",\"progress\":0,\"step\":\"Build Failed\",\"status\":\"error\"}"
