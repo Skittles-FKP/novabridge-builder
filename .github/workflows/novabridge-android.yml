@@ -1,138 +1,320 @@
 name: NovaBridge Android Cloud Build
 
 on:
-  repository_dispatch:
-    types: [android-cloud-build]
+  workflow_dispatch:
+    inputs:
+      buildId:
+        description: "NovaBridge Build ID"
+        required: true
+        type: string
+      zipUrl:
+        description: "URL of the native project ZIP from Worker"
+        required: true
+        type: string
 
 jobs:
-  android-build:
+  android-cloud-build:
     runs-on: ubuntu-latest
 
+    env:
+      WORKER_URL: https://novabridge-build-worker.novabridge.workers.dev
+      BUILD_ID: ${{ github.event.inputs.buildId }}
+      ZIP_URL: ${{ github.event.inputs.zipUrl }}
+
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    # -----------------------------------------
-    # STEP 0: Parse GitHub Dispatch Payload
-    # -----------------------------------------
-    - name: Extract Build Metadata
-      id: meta
-      run: |
-        echo "BUILD_ID=${{ github.event.client_payload.buildId }}" >> $GITHUB_ENV
-        echo "ZIP_URL=${{ github.event.client_payload.zipUrl }}" >> $GITHUB_ENV
-        echo "CALLBACK=https://novabridge-build-worker.novabridge.workers.dev/api/builds/callback" >> $GITHUB_ENV
+      # ------------------------
+      # PROGRESS: Preparing Env
+      # ------------------------
+      - name: Notify Worker – Preparing Environment
+        run: |
+          cat <<JSON > payload.json
+          {
+            "buildId": "$BUILD_ID",
+            "status": "running",
+            "phase": "Preparing Environment",
+            "progress": {
+              "percent": 5,
+              "stepLabel": "Preparing Environment",
+              "status": "running"
+            }
+          }
+          JSON
 
-    # -----------------------------------------
-    # STEP 1: Notify Worker – Environment Ready
-    # -----------------------------------------
-    - name: Notify Worker - Preparing Environment
-      run: |
-        curl -X POST $CALLBACK \
-          -H "Content-Type: application/json" \
-          -d "{\"buildId\": \"$BUILD_ID\", \"phase\": \"Preparing Environment\", \"percent\": 5, \"status\": \"running\"}"
-
-    - name: Checkout Repo
-      uses: actions/checkout@v4
-
-    # -----------------------------------------
-    # STEP 2: Download Source ZIP
-    # -----------------------------------------
-    - name: Download ZIP from Worker
-      run: |
-        mkdir -p build_src
-        curl -L "$ZIP_URL" -o build_src/project.zip
-
-        curl -X POST $CALLBACK \
-          -H "Content-Type: application/json" \
-          -d "{\"buildId\": \"$BUILD_ID\", \"phase\": \"Extracting Native Project\", \"percent\": 15}"
-
-    # -----------------------------------------
-    # STEP 3: Extract ZIP
-    # -----------------------------------------
-    - name: Extract Project ZIP
-      run: |
-        unzip -o build_src/project.zip -d build
-
-        curl -X POST $CALLBACK \
-          -H "Content-Type: application/json" \
-          -d "{\"buildId\": \"$BUILD_ID\", \"phase\": \"Project Extracted\", \"percent\": 25}"
-
-    # -----------------------------------------
-    # STEP 4: Install JDK + Android SDK
-    # -----------------------------------------
-    - name: Setup Java
-      uses: actions/setup-java@v4
-      with:
-        distribution: "temurin"
-        java-version: "17"
-
-    - name: Setup Android SDK
-      uses: android-actions/setup-android@v3
-
-    # -----------------------------------------
-    # STEP 5: Locate Gradle Wrapper
-    # -----------------------------------------
-    - name: Locate Gradle Root
-      id: gradle
-      run: |
-        ROOT=$(find build -name "gradlew" -printf "%h" | head -n 1)
-        if [ -z "$ROOT" ]; then
-          echo "ERROR: No gradlew found."
-          exit 1
-        fi
-        echo "ROOT=$ROOT" >> $GITHUB_ENV
-
-        curl -X POST $CALLBACK \
-          -H "Content-Type: application/json" \
-          -d "{\"buildId\": \"$BUILD_ID\", \"phase\": \"Running Build Tasks\", \"percent\": 40}"
-
-    # -----------------------------------------
-    # STEP 6: Build APK
-    # -----------------------------------------
-    - name: Run Android Build
-      run: |
-        cd "$ROOT"
-        chmod +x ./gradlew
-        ./gradlew assembleRelease --warning-mode all
-
-    # Notify Worker: Build Completed or Error
-      continue-on-error: true
-
-    - name: Notify Worker - Build Result
-      run: |
-        if [ "${{ steps.gradle.outcome }}" = "failure" ]; then
-          curl -X POST $CALLBACK \
+          curl -sS -X POST "$WORKER_URL/callback" \
             -H "Content-Type: application/json" \
-            -d "{\"buildId\": \"$BUILD_ID\", \"phase\": \"Build Failed\", \"status\": \"error\", \"percent\": 50}"
-          exit 1
-        else
-          curl -X POST $CALLBACK \
+            --data-binary @payload.json
+        env:
+          BUILD_ID: ${{ env.BUILD_ID }}
+          WORKER_URL: ${{ env.WORKER_URL }}
+
+      # ------------------------
+      # Download ZIP
+      # ------------------------
+      - name: Download native project ZIP
+        run: |
+          echo "Downloading ZIP from: $ZIP_URL"
+          mkdir -p build
+          curl -fSL "$ZIP_URL" -o build/project.zip
+          ls -lh build
+        env:
+          ZIP_URL: ${{ env.ZIP_URL }}
+
+      # ------------------------
+      # PROGRESS: Extracting Native Project
+      # ------------------------
+      - name: Notify Worker – Extracting Native Project
+        run: |
+          cat <<JSON > payload.json
+          {
+            "buildId": "$BUILD_ID",
+            "status": "running",
+            "phase": "Extracting Native Project",
+            "progress": {
+              "percent": 20,
+              "stepLabel": "Extracting Native Project",
+              "status": "running"
+            }
+          }
+          JSON
+
+          curl -sS -X POST "$WORKER_URL/callback" \
             -H "Content-Type: application/json" \
-            -d "{\"buildId\": \"$BUILD_ID\", \"phase\": \"Packaging APK\", \"percent\": 70}"
-        fi
+            --data-binary @payload.json
+        env:
+          BUILD_ID: ${{ env.BUILD_ID }}
+          WORKER_URL: ${{ env.WORKER_URL }}
 
-    # -----------------------------------------
-    # STEP 7: Find Generated APK
-    # -----------------------------------------
-    - name: Locate APK
-      id: apk
-      run: |
-        APK=$(find build -name "*.apk" | head -n 1)
-        echo "APK=$APK" >> $GITHUB_ENV
-        echo "Found APK: $APK"
+      # ------------------------
+      # Extract ZIP
+      # ------------------------
+      - name: Extract project ZIP
+        run: |
+          cd build
+          unzip -q project.zip
+          echo "Contents of build/:"
+          ls -R .
 
-        curl -X POST $CALLBACK \
-          -H "Content-Type: application/json" \
-          -d "{\"buildId\": \"$BUILD_ID\", \"phase\": \"Uploading to R2\", \"percent\": 85}"
+      # ------------------------
+      # PROGRESS: Project Extracted
+      # ------------------------
+      - name: Notify Worker – Project Extracted
+        run: |
+          cat <<JSON > payload.json
+          {
+            "buildId": "$BUILD_ID",
+            "status": "running",
+            "phase": "Project Extracted",
+            "progress": {
+              "percent": 30,
+              "stepLabel": "Project Extracted",
+              "status": "running"
+            }
+          }
+          JSON
 
-    # -----------------------------------------
-    # STEP 8: Upload APK to Worker → R2
-    # -----------------------------------------
-    - name: Upload Artifact to Worker
-      run: |
-        curl -X POST "https://novabridge-build-worker.novabridge.workers.dev/api/builds/upload-apk" \
-          -H "Content-Type: application/octet-stream" \
-          -H "X-Build-Id: $BUILD_ID" \
-          --data-binary @"$APK"
+          curl -sS -X POST "$WORKER_URL/callback" \
+            -H "Content-Type: application/json" \
+            --data-binary @payload.json
+        env:
+          BUILD_ID: ${{ env.BUILD_ID }}
+          WORKER_URL: ${{ env.WORKER_URL }}
 
-        curl -X POST $CALLBACK \
-          -H "Content-Type: application/json" \
-          -d "{\"buildId\": \"$BUILD_ID\", \"phase\": \"Build Complete\", \"percent\": 100, \"status\": \"complete\"}"
+      # ------------------------
+      # Detect Gradle root
+      # ------------------------
+      - name: Detect Gradle project root
+        id: detect-root
+        run: |
+          ROOT=$(find build -maxdepth 5 -type f \( -name "settings.gradle" -o -name "settings.gradle.kts" \) | head -n 1 | xargs -r dirname || echo "")
+          if [ -z "$ROOT" ]; then
+            echo "No Gradle settings file found under build/"
+            exit 1
+          fi
+          echo "Detected Gradle root: $ROOT"
+          echo "ROOT=$ROOT" >> "$GITHUB_ENV"
+
+      # ------------------------
+      # PROGRESS: Running Build Tasks
+      # ------------------------
+      - name: Notify Worker – Running Build Tasks
+        run: |
+          cat <<JSON > payload.json
+          {
+            "buildId": "$BUILD_ID",
+            "status": "running",
+            "phase": "Running Build Tasks",
+            "progress": {
+              "percent": 50,
+              "stepLabel": "Running Build Tasks",
+              "status": "running"
+            }
+          }
+          JSON
+
+          curl -sS -X POST "$WORKER_URL/callback" \
+            -H "Content-Type: application/json" \
+            --data-binary @payload.json
+        env:
+          BUILD_ID: ${{ env.BUILD_ID }}
+          WORKER_URL: ${{ env.WORKER_URL }}
+
+      # ------------------------
+      # Setup Java & Gradle
+      # ------------------------
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # ------------------------
+      # Run Gradle assembleRelease
+      # ------------------------
+      - name: Run Gradle assembleRelease
+        run: |
+          echo "Using ROOT: $ROOT"
+          cd "$ROOT"
+
+          if [ -x "./gradlew" ]; then
+            echo "Using Gradle wrapper"
+            ./gradlew assembleRelease --warning-mode all
+          else
+            echo "Using system Gradle"
+            gradle assembleRelease --warning-mode all
+          fi
+
+      # ------------------------
+      # PROGRESS: Packaging APK
+      # ------------------------
+      - name: Notify Worker – Packaging APK
+        if: success()
+        run: |
+          cat <<JSON > payload.json
+          {
+            "buildId": "$BUILD_ID",
+            "status": "running",
+            "phase": "Packaging APK",
+            "progress": {
+              "percent": 70,
+              "stepLabel": "Packaging APK",
+              "status": "running"
+            }
+          }
+          JSON
+
+          curl -sS -X POST "$WORKER_URL/callback" \
+            -H "Content-Type: application/json" \
+            --data-binary @payload.json
+        env:
+          BUILD_ID: ${{ env.BUILD_ID }}
+          WORKER_URL: ${{ env.WORKER_URL }}
+
+      # ------------------------
+      # Locate APK and upload artifact
+      # ------------------------
+      - name: Locate APK
+        if: success()
+        id: locate-apk
+        run: |
+          ROOT="$ROOT"
+          echo "Searching for APKs under $ROOT"
+          APK=$(find "$ROOT" -type f -name "*.apk" | head -n 1 || echo "")
+          if [ -z "$APK" ]; then
+            echo "No APK found"
+            exit 1
+          fi
+          echo "Found APK: $APK"
+          echo "APK_PATH=$APK" >> "$GITHUB_ENV"
+
+      - name: Upload APK as artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: novabridge-android-${{ env.BUILD_ID }}
+          path: ${{ env.APK_PATH }}
+
+      # ------------------------
+      # PROGRESS: Uploading to R2 (conceptual) / Final success
+      # ------------------------
+      - name: Notify Worker – Uploading to R2
+        if: success()
+        run: |
+          cat <<JSON > payload.json
+          {
+            "buildId": "$BUILD_ID",
+            "status": "running",
+            "phase": "Uploading to R2",
+            "progress": {
+              "percent": 90,
+              "stepLabel": "Uploading to R2",
+              "status": "running"
+            }
+          }
+          JSON
+
+          curl -sS -X POST "$WORKER_URL/callback" \
+            -H "Content-Type: application/json" \
+            --data-binary @payload.json
+        env:
+          BUILD_ID: ${{ env.BUILD_ID }}
+          WORKER_URL: ${{ env.WORKER_URL }}
+
+      - name: Notify Worker – Build Complete (success)
+        if: success()
+        run: |
+          cat <<JSON > payload.json
+          {
+            "buildId": "$BUILD_ID",
+            "status": "success",
+            "phase": "Build Complete",
+            "artifactUrl": "github-artifact://novabridge-android-$BUILD_ID",
+            "progress": {
+              "percent": 100,
+              "stepLabel": "Build Complete",
+              "status": "success"
+            }
+          }
+          JSON
+
+          curl -sS -X POST "$WORKER_URL/callback" \
+            -H "Content-Type: application/json" \
+            --data-binary @payload.json
+        env:
+          BUILD_ID: ${{ env.BUILD_ID }}
+          WORKER_URL: ${{ env.WORKER_URL }}
+
+      # ------------------------
+      # Error path
+      # ------------------------
+      - name: Notify Worker – Build Failed
+        if: failure()
+        run: |
+          MSG="GitHub Actions build failed – check workflow logs"
+          echo "$MSG"
+
+          cat <<JSON > payload.json
+          {
+            "buildId": "$BUILD_ID",
+            "status": "error",
+            "phase": "Build Failed",
+            "message": "$MSG",
+            "progress": {
+              "percent": 50,
+              "stepLabel": "Running Build Tasks",
+              "status": "error"
+            }
+          }
+          JSON
+
+          curl -sS -X POST "$WORKER_URL/callback" \
+            -H "Content-Type: application/json" \
+            --data-binary @payload.json || true
+        env:
+          BUILD_ID: ${{ env.BUILD_ID }}
+          WORKER_URL: ${{ env.WORKER_URL }}
