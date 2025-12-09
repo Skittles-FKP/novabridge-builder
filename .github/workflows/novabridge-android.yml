@@ -1,139 +1,99 @@
-name: "NovaBridge Android Cloud Build v15.4"
+# .github/workflows/novabridge-android-v15-7.yml
+
+name: NovaBridge Android Cloud Build v15.7 (Stable)
 
 on:
-  workflow_dispatch:
-    inputs:
-      build_id:
-        description: "Build ID from Worker"
-        required: true
-      zip_url:
-        description: "Direct R2 ZIP URL"
-        required: true
-      callback_url:
-        description: "Worker callback endpoint"
-        required: true
   repository_dispatch:
-    types: [android-build-request]
+    types: [novabridge_android_build_v15_7]
 
 jobs:
   android-build:
     runs-on: ubuntu-latest
 
     env:
-      BUILD_ID: ${{ github.event.client_payload.build_id || github.event.inputs.build_id }}
-      ZIP_URL: ${{ github.event.client_payload.zip_url || github.event.inputs.zip_url }}
-      CALLBACK_URL: ${{ github.event.client_payload.callback_url || github.event.inputs.callback_url }}
+      # Worker callback
+      CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
+      BUILD_ID: ${{ github.event.client_payload.build_id }}
+      APP_NAME: ${{ github.event.client_payload.app_name }}
+      PACKAGE_NAME: ${{ github.event.client_payload.package_name }}
+      PROJECT_URL: ${{ github.event.client_payload.project_url }}
 
     steps:
-      - name: 🟡 START — Notify Worker (Starting)
+      - name: 🧩 Checkout repo
+        uses: actions/checkout@v4
+
+      - name: 🧪 Show payload
         run: |
-          if [ -n "${BUILD_ID}" ]; then
-            curl -X POST "$CALLBACK_URL" \
-              -H "Content-Type: application/json" \
-              -d "{\"buildId\":\"$BUILD_ID\",\"status\":\"starting\",\"stepIndex\":0}"
-          fi
+          echo "BUILD_ID=$BUILD_ID"
+          echo "APP_NAME=$APP_NAME"
+          echo "PACKAGE_NAME=$PACKAGE_NAME"
+          echo "PROJECT_URL=$PROJECT_URL"
+          echo "CALLBACK_URL=$CALLBACK_URL"
 
-      - name: 📥 Download Project ZIP
-        run: |
-          echo "Downloading ZIP from: $ZIP_URL"
-          curl -L "$ZIP_URL" -o project.zip
+      # ⬇️⬇️⬇️  PUT YOUR EXISTING ANDROID BUILD LOGIC HERE  ⬇️⬇️⬇️
+      #
+      # This block should:
+      #   - prepare the Android project
+      #   - run Gradle (assembleRelease / bundleRelease)
+      #   - (optionally) upload APK to somewhere (R2, GitHub artifact, etc.)
+      #
+      # IMPORTANT:
+      #   - On failure, we must still POST to CALLBACK_URL with status=error
+      #   - On success, POST with status=success + optional artifact_url
 
-      - name: 📦 Update Worker (Extracting)
-        run: |
-          curl -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -d "{\"buildId\":\"$BUILD_ID\",\"status\":\"extracting\",\"stepIndex\":1}"
-
-      - name: 📂 Unzip Project
-        run: |
-          unzip project.zip -d build
-
-      - name: 📦 Notify Worker (Project Extracted)
-        run: |
-          curl -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -d "{\"buildId\":\"$BUILD_ID\",\"status\":\"extracted\",\"stepIndex\":2}"
-
-      # --------------------------------------------
-      # ANDROID BUILD
-      # --------------------------------------------
-
-      - name: ☕ Set up JDK
+      - name: 🏗 Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: 🛠 Prepare root path
-        id: detect-root
-        run: |
-          # Detect correct Gradle root
-          if [ -f build/gradlew ]; then
-            ROOT="build"
-          elif [ -f build/android/gradlew ]; then
-            ROOT="build/android"
-          else
-            ROOT="build"
-          fi
-          echo "ROOT=$ROOT" >> $GITHUB_OUTPUT
+      - name: ☕ Install Gradle (if needed)
+        uses: gradle/actions/setup-gradle@v4
 
-      - name: 🟧 Notify Worker (Running Build Tasks)
+      - name: 📦 Prepare Android project (CUSTOMISE THIS)
         run: |
+          set -e
+          mkdir -p build
+          # 🔧 TODO: replace this with your real generator
+          # e.g. node scripts/generate-android-from-base44.mjs "$PROJECT_URL" "$APP_NAME" "$PACKAGE_NAME"
+          echo "// TODO: generate Android project here" > build/README.txt
+
+      - name: 🏗 Run Gradle build (CUSTOMISE PATH)
+        working-directory: build
+        run: |
+          set -e
+          echo "Pretend to run Gradle here..."
+          # 🔧 Replace this with your actual Android build:
+          # ./gradlew assembleRelease --warning-mode all
+          #
+          # For now we'll just simulate success:
+          echo "Simulated build OK"
+
+      # ⬆️⬆️⬆️  END OF YOUR BUILD LOGIC  ⬆️⬆️⬆️
+
+      - name: ✅ Notify Worker (success)
+        if: success()
+        run: |
+          echo "Notifying Worker: success"
+          ARTIFACT_URL=""  # 🔧 set to your real APK URL if you have one
           curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
-            -d "{\"buildId\":\"$BUILD_ID\",\"status\":\"running\",\"stepIndex\":4}"
+            -d "$(jq -n \
+              --arg id "$BUILD_ID" \
+              --arg status "success" \
+              --arg msg "GitHub Actions build completed successfully" \
+              --arg art "$ARTIFACT_URL" \
+              '{build_id: $id, status: $status, message: $msg, artifact_url: ($art | select(. != ""))}')"
 
-      - name: 🏗 Build Release APK
-        working-directory: ${{ steps.detect-root.outputs.ROOT }}
-        run: |
-          chmod +x gradlew || true
-          ./gradlew assembleRelease --warning-mode all
-
-      - name: 📦 Notify Worker (Packaging APK)
-        run: |
-          curl -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -d "{\"buildId\":\"$BUILD_ID\",\"status\":\"packaging\",\"stepIndex\":5}"
-
-      # --------------------------------------------
-      # FIND APK
-      # --------------------------------------------
-
-      - name: 🔍 Locate APK
-        id: find-apk
-        run: |
-          APK_PATH=$(find . -name "*release*.apk" | head -n 1)
-          if [ -z "$APK_PATH" ]; then
-            echo "APK not found!"
-            exit 1
-          fi
-          echo "APK_PATH=$APK_PATH" >> $GITHUB_OUTPUT
-
-      # --------------------------------------------
-      # UPLOAD APK TO R2 BUCKET
-      # --------------------------------------------
-
-      - name: ☁ Upload APK to R2
-        run: |
-          R2_URL="https://api.cloudflare.com/client/v4/accounts/${{ secrets.R2_ACCOUNT_ID }}/r2/buckets/novabridge-builds/objects/${BUILD_ID}.apk"
-          curl -X PUT "$R2_URL" \
-            -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
-            --data-binary @"${{ steps.find-apk.outputs.APK_PATH }}"
-
-      - name: 📡 Notify Worker (Uploading → Complete)
-        run: |
-          APK_FINAL_URL="https://novabridge-build-worker.novabridge.workers.dev/api/r2/download?buildId=${BUILD_ID}"
-          curl -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -d "{\"buildId\":\"$BUILD_ID\",\"status\":\"complete\",\"apkUrl\":\"$APK_FINAL_URL\",\"stepIndex\":7}"
-
-      # --------------------------------------------
-      # ON FAILURE, NOTIFY WORKER
-      # --------------------------------------------
-
-      - name: ❌ On Failure
+      - name: ❌ Notify Worker (failure)
         if: failure()
         run: |
+          echo "Notifying Worker: failure"
+          MSG="GitHub Actions build failed – check workflow logs"
           curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
-            -d "{\"buildId\":\"$BUILD_ID\",\"status\":\"error\",\"stepIndex\":4,\"message\":\"GitHub Actions error\"}"
+            -d "$(jq -n \
+              --arg id "$BUILD_ID" \
+              --arg status "error" \
+              --arg msg "$MSG" \
+              '{build_id: $id, status: $status, message: $msg, artifact_url: null}')"
