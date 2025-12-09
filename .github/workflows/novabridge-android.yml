@@ -1,4 +1,6 @@
-name: NovaBridge Android Cloud Build v16.5 (Hybrid, Real Gradle)
+# .github/workflows/novabridge-android-v16-5.yml
+
+name: NovaBridge Android Cloud Build v16.5
 
 on:
   repository_dispatch:
@@ -9,18 +11,18 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
+      BUILD_ID: ${{ github.event.client_payload.build_id }}
+      ZIP_URL: ${{ github.event.client_payload.zip_url }}
       CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
-      BUILD_ID:     ${{ github.event.client_payload.build_id }}
-      ZIP_URL:      ${{ github.event.client_payload.zip_url }}
-      APP_NAME:     ${{ github.event.client_payload.app_name }}
+      APP_NAME: ${{ github.event.client_payload.app_name }}
       PACKAGE_NAME: ${{ github.event.client_payload.package_name }}
-      PROJECT_URL:  ${{ github.event.client_payload.project_url }}
+      PROJECT_URL: ${{ github.event.client_payload.project_url }}
 
     steps:
-      - name: 🧩 Checkout repo
+      - name: 🧩 Checkout repository
         uses: actions/checkout@v4
 
-      - name: 🧪 Show payload
+      - name: 🧪 Show incoming payload
         run: |
           echo "BUILD_ID=$BUILD_ID"
           echo "ZIP_URL=$ZIP_URL"
@@ -29,94 +31,99 @@ jobs:
           echo "PACKAGE_NAME=$PACKAGE_NAME"
           echo "PROJECT_URL=$PROJECT_URL"
 
-      - name: 📥 Download native project ZIP
-        run: |
-          if [ -z "$ZIP_URL" ]; then
-            echo "❌ Missing ZIP_URL"
-            exit 1
-          fi
-          curl -fSL "$ZIP_URL" -o project.zip
-          ls -lh project.zip
-
-      - name: 📦 Unzip project
-        run: |
-          mkdir -p project
-          unzip -q project.zip -d project
-          echo "Unzipped contents:"
-          ls -R project || true
-
       - name: ☕ Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: 🛠 Make Gradle wrapper executable
-        run: |
-          if [ -f project/gradlew ]; then
-            chmod +x project/gradlew
-          else
-            echo "❌ gradlew missing"
-            exit 1
-          fi
+      - name: 🏗 Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
 
-      - name: 🏗 Gradle assembleRelease
-        working-directory: project
+      - name: 📥 Download native ZIP from Worker
         run: |
-          ./gradlew assembleRelease --no-daemon --stacktrace
+          set -e
+          if [ -z "$ZIP_URL" ]; then
+            echo "Missing ZIP_URL"; exit 1;
+          fi
+          echo "Downloading ZIP from $ZIP_URL"
+          curl -fSL "$ZIP_URL" -o project.zip
+          ls -lh project.zip
+
+      - name: 📦 Extract Android project
+        run: |
+          set -e
+          mkdir -p android_project
+          unzip -o project.zip -d android_project || (echo "unzip failed"; exit 1)
+          ls -R android_project || true
+
+      - name: 🏗 Run Gradle assembleRelease
+        working-directory: android_project
+        run: |
+          set -e
+          echo "Running Gradle assembleRelease…"
+          gradle assembleRelease --warning-mode all
 
       - name: 🔍 Locate release APK
         id: find_apk
+        working-directory: android_project
         run: |
-          APK=$(find project -type f -name "*release*.apk" | head -n 1 || true)
-          if [ -z "$APK" ]; then
-            echo "❌ No release APK found"
+          set -e
+          APK_PATH=$(find . -type f -name "*release*.apk" | head -n 1 || true)
+          if [ -z "$APK_PATH" ]; then
+            echo "No APK found!"
+            echo "apk_path=" >> "$GITHUB_OUTPUT"
             exit 1
           fi
-          echo "apk_path=$APK" >> $GITHUB_OUTPUT
-          echo "Found APK: $APK"
+          echo "Found APK at: $APK_PATH"
+          echo "apk_path=$APK_PATH" >> "$GITHUB_OUTPUT"
 
-      - name: 🔐 Configure R2 credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      # You can optionally upload the APK as a GitHub artifact
+      - name: 📤 Upload APK as artifact
+        if: success() && steps.find_apk.outputs.apk_path != ''
+        uses: actions/upload-artifact@v4
         with:
-          aws-access-key-id: ${{ secrets.R2_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          aws-region: auto
+          name: novabridge-android-apk
+          path: android_project/${{ steps.find_apk.outputs.apk_path }}
 
-      - name: ☁️ Upload APK to Cloudflare R2
-        id: upload_r2
-        run: |
-          APK_PATH="${{ steps.find_apk.outputs.apk_path }}"
-          OBJECT_KEY="android/${BUILD_ID}.apk"
-
-          echo "Uploading APK → R2 object: ${OBJECT_KEY}"
-
-          aws s3 cp "$APK_PATH" \
-            "s3://novabridge-builds/$OBJECT_KEY" \
-            --endpoint-url "https://cf73b96d9ea070a2b23419c8e549ea58.r2.cloudflarestorage.com"
-
-          ART_URL="https://pub-5c67d577d84a45a98ab4740047d6b178.r2.dev/$OBJECT_KEY"
-          echo "artifact_url=$ART_URL" >> $GITHUB_OUTPUT
-          echo "Public APK URL: $ART_URL"
-
-      - name: ✅ Notify Worker (SUCCESS)
+      - name: ✅ Notify Worker (success)
         if: success()
         run: |
-          ART_URL="${{ steps.upload_r2.outputs.artifact_url }}"
-          DATA=$(jq -n \
-            --arg id "$BUILD_ID" \
-            --arg st "success" \
-            --arg msg "Gradle build completed successfully" \
-            --arg art "$ART_URL" \
-            '{build_id:$id,status:$st,message:$msg,artifact_url:$art}')
-          curl -X POST "$CALLBACK_URL" -H "Content-Type: application/json" -d "$DATA"
+          if [ -z "$CALLBACK_URL" ]; then
+            echo "No CALLBACK_URL, skipping callback."
+            exit 0
+          fi
 
-      - name: ❌ Notify Worker (FAILURE)
+          # For now, artifact_url points to the GitHub Actions run page
+          ARTIFACT_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          echo "Notifying Worker: success → $CALLBACK_URL"
+          jq -n \
+            --arg id "$BUILD_ID" \
+            --arg status "success" \
+            --arg msg "GitHub Actions build completed successfully" \
+            --arg art "$ARTIFACT_URL" \
+            '{build_id: $id, status: $status, message: $msg, artifact_url: $art}' \
+          | curl -fSL -X POST "$CALLBACK_URL" \
+              -H "Content-Type: application/json" \
+              -d @-
+
+      - name: ❌ Notify Worker (failure)
         if: failure()
         run: |
-          DATA=$(jq -n \
+          if [ -z "$CALLBACK_URL" ]; then
+            echo "No CALLBACK_URL, skipping failure callback."
+            exit 0
+          fi
+
+          MSG="GitHub Actions build failed – check workflow logs"
+          echo "Notifying Worker: failure → $CALLBACK_URL"
+
+          jq -n \
             --arg id "$BUILD_ID" \
-            --arg st "error" \
-            --arg msg "Gradle build failed — check GitHub logs" \
-            '{build_id:$id,status:$st,message:$msg}')
-          curl -X POST "$CALLBACK_URL" -H "Content-Type: application/json" -d "$DATA"
+            --arg status "error" \
+            --arg msg "$MSG" \
+            '{build_id: $id, status: $status, message: $msg, artifact_url: null}' \
+          | curl -fSL -X POST "$CALLBACK_URL" \
+              -H "Content-Type: application/json" \
+              -d @-
