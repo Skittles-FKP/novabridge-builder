@@ -1,70 +1,102 @@
-name: NovaBridge Android Cloud Build v15.9.1
+name: NovaBridge Android Cloud Build v15.9.2 (Stable)
 
 on:
   repository_dispatch:
-    types: [novabridge_android_build_v15_7]
+    types: [novabridge_android_build_v15_9_2]
 
 jobs:
   android-build:
     runs-on: ubuntu-latest
 
     env:
-      CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
-      BUILD_ID:     ${{ github.event.client_payload.build_id }}
-      ZIP_URL:      ${{ github.event.client_payload.zip_url }}
-      APP_NAME:     ${{ github.event.client_payload.app_name }}
-      PACKAGE_NAME: ${{ github.event.client_payload.package_name }}
-      PROJECT_URL:  ${{ github.event.client_payload.project_url }}
+      BUILD_ID:       ${{ github.event.client_payload.build_id }}
+      ZIP_URL:        ${{ github.event.client_payload.zip_url }}
+      CALLBACK_URL:   ${{ github.event.client_payload.callback_url }}
+      APP_NAME:       ${{ github.event.client_payload.app_name }}
+      PACKAGE_NAME:   ${{ github.event.client_payload.package_name }}
+      PROJECT_URL:    ${{ github.event.client_payload.project_url }}
 
     steps:
-      - name: 🧩 Checkout repo
+
+      - name: 🧩 Checkout Repo
         uses: actions/checkout@v4
 
-      - name: 🧪 Print Payload
+      - name: 🧪 Debug Incoming Payload
         run: |
-          echo "Callback URL: $CALLBACK_URL"
-          echo "Build ID: $BUILD_ID"
-          echo "ZIP URL: $ZIP_URL"
+          echo "--- Incoming Payload ---"
+          echo "BUILD_ID=$BUILD_ID"
+          echo "ZIP_URL=$ZIP_URL"
+          echo "CALLBACK_URL=$CALLBACK_URL"
+          echo "APP_NAME=$APP_NAME"
+          echo "PACKAGE_NAME=$PACKAGE_NAME"
+          echo "PROJECT_URL=$PROJECT_URL"
 
-      - name: 🔽 Download Project ZIP from Worker
+      ###########################################################
+      # 1) DOWNLOAD NATIVE PROJECT ZIP FROM WORKER
+      ###########################################################
+
+      - name: 📥 Download Project ZIP
         run: |
-          CLEAN_URL=$(echo "$ZIP_URL" | tr -d '[:space:]')
-          echo "Downloading ZIP from $CLEAN_URL"
-          curl -L "$CLEAN_URL" -o project.zip
+          echo "Downloading ZIP from $ZIP_URL"
+          curl -L "$ZIP_URL" --output project.zip
 
       - name: 📦 Extract ZIP
-        run: unzip project.zip -d build || echo "ZIP extraction failed"
+        run: |
+          unzip project.zip -d build || (echo "ZIP extraction failed" && exit 1)
 
-      - name: 🏗 Setup Java
+      ###########################################################
+      # 2) SETUP JAVA / GRADLE
+      ###########################################################
+
+      - name: ☕ Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '17'
 
       - name: 🏗 Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: 🧱 Run Android Build
-        run: |
-          cd build
-          echo "Simulating Android Build..."
-          echo "APK output would be generated here"
-          echo "OK" > output.txt
+      ###########################################################
+      # 3) RUN ANDROID BUILD
+      ###########################################################
 
-      - name: 📤 Notify Worker (SUCCESS)
+      - name: 🔨 Build Android (Gradle)
+        working-directory: build
+        run: |
+          echo "Running Gradle build..."
+          ./gradlew assembleRelease --stacktrace --warning-mode all
+
+      ###########################################################
+      # 4) UPLOAD ARTIFACT (APK)
+      ###########################################################
+
+      - name: 📤 Find release APK
+        id: apk-path
+        run: |
+          APK=$(find build -name "*.apk" | head -n 1)
+          echo "apk_path=$APK" >> $GITHUB_OUTPUT
+
+      ###########################################################
+      # 5) NOTIFY WORKER (SUCCESS)
+      ###########################################################
+
+      - name: ✅ Notify Worker – Success
         if: success()
         run: |
-          CLEAN=$(echo "$CALLBACK_URL" | tr -d '[:space:]')
-          echo "Callback: $CLEAN"
-          curl -X POST "$CLEAN" \
+          echo "Notifying Worker of SUCCESS..."
+          curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
-            -d '{"build_id":"'"$BUILD_ID"'","status":"success","message":"Build completed"}'
+            -d "{\"build_id\":\"$BUILD_ID\",\"status\":\"success\",\"message\":\"Build completed successfully\",\"artifact_url\":\"https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
 
-      - name: ❌ Notify Worker (FAILURE)
+      ###########################################################
+      # 6) NOTIFY WORKER (FAILURE)
+      ###########################################################
+
+      - name: ❌ Notify Worker – Failure
         if: failure()
         run: |
-          CLEAN=$(echo "$CALLBACK_URL" | tr -d '[:space:]')
-          echo "Callback: $CLEAN"
-          curl -X POST "$CLEAN" \
+          echo "Notifying Worker of FAILURE..."
+          curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
-            -d '{"build_id":"'"$BUILD_ID"'","status":"error","message":"Build failed"}'
+            -d "{\"build_id\":\"$BUILD_ID\",\"status\":\"error\",\"message\":\"GitHub Actions build failed – check logs\",\"artifact_url\":null}"
