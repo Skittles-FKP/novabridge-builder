@@ -1,15 +1,15 @@
-name: NovaBridge Android Cloud Build v16.2 (Stable)
+# .github/workflows/novabridge-android.yml
+name: NovaBridge Android Cloud Build v16.3
 
 on:
   repository_dispatch:
-    types: [novabridge_android_build_v16_2]
+    types: [novabridge_android_build_v15_7]
 
 jobs:
   android-build:
     runs-on: ubuntu-latest
 
     env:
-      # Payload from Worker (camelCase or snake_case normalised by Worker)
       CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
       BUILD_ID:     ${{ github.event.client_payload.build_id }}
       APP_NAME:     ${{ github.event.client_payload.app_name }}
@@ -34,63 +34,49 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: ☕ Setup Gradle
+      - name: ☕ Install Gradle (if needed)
         uses: gradle/actions/setup-gradle@v4
 
-      # 🔧 Your real Android project generation goes here
-      - name: 📦 Prepare Android project (stub)
+      - name: 📦 Prepare Android project (placeholder)
         run: |
           set -e
-          mkdir -p build/app
-          echo "NovaBridge placeholder project" > build/app/README.txt
+          mkdir -p build
+          echo "// TODO: generate Android project from $PROJECT_URL" > build/README.txt
 
-      # 🔧 Your real Gradle command goes here
-      - name: 🏗 Run Gradle build (stub)
+      - name: 🏗 Run Gradle build (simulated)
         working-directory: build
         run: |
           set -e
-          echo "Simulating Gradle assembleRelease..."
+          echo "Simulating Gradle build for $APP_NAME ($PACKAGE_NAME)..."
           echo "Simulated build OK"
 
-      # ---------- SAFE CALLBACKS ----------
-
+      # ---- Notify Worker: SUCCESS ----
       - name: ✅ Notify Worker (success)
-        if: success()
+        if: success() && env.CALLBACK_URL != ''
         run: |
-          if [ -z "${CALLBACK_URL}" ]; then
-            echo "No CALLBACK_URL provided – skipping success callback."
-            exit 0
-          fi
-
-          echo "Notifying Worker: success → ${CALLBACK_URL}"
-
-          # Do NOT fail build if callback fails
-          curl -sS -X POST "${CALLBACK_URL}" \
+          set -e
+          echo "Notifying Worker (success) → $CALLBACK_URL"
+          ARTIFACT_URL=""
+          curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -d "$(jq -n \
               --arg id "$BUILD_ID" \
               --arg status "success" \
               --arg msg "GitHub Actions build completed successfully" \
-              '{build_id: $id, status: $status, message: $msg, artifact_url: null}')" \
-          || echo "Callback (success) failed, but build is already successful."
+              --arg art "$ARTIFACT_URL" \
+              '{build_id: $id, status: $status, message: $msg, artifact_url: ($art | select(. != ""))}')"
 
+      # ---- Notify Worker: FAILURE ----
       - name: ❌ Notify Worker (failure)
-        if: failure()
+        if: failure() && env.CALLBACK_URL != ''
         run: |
-          if [ -z "${CALLBACK_URL}" ]; then
-            echo "No CALLBACK_URL provided – skipping failure callback."
-            exit 0
-          fi
-
-          echo "Notifying Worker: failure → ${CALLBACK_URL}"
+          set -e
+          echo "Notifying Worker (failure) → $CALLBACK_URL"
           MSG="GitHub Actions build failed – check workflow logs"
-
-          # Do NOT fail job further if callback fails
-          curl -sS -X POST "${CALLBACK_URL}" \
+          curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -d "$(jq -n \
               --arg id "$BUILD_ID" \
               --arg status "error" \
               --arg msg "$MSG" \
-              '{build_id: $id, status: $status, message: $msg, artifact_url: null}')" \
-          || echo "Callback (failure) failed (curl error), original build error already recorded."
+              '{build_id: $id, status: $status, message: $msg, artifact_url: null}')"
