@@ -1,6 +1,13 @@
 # .github/workflows/novabridge-android-v16-5.yml
+#
+# NovaBridge Android Cloud Build v16.5 (Hybrid, REAL Gradle build)
+# ---------------------------------------------------------------
+# Triggered via repository_dispatch:
+#   event_type: novabridge_android_build_v16_5
+# Payload (from Worker v16.5):
+#   build_id, zip_url, callback_url, app_name, package_name, project_url
 
-name: NovaBridge Android Cloud Build v16.5 (Hybrid)
+name: NovaBridge Android Cloud Build v16.5 (Hybrid, Gradle)
 
 on:
   repository_dispatch:
@@ -17,6 +24,7 @@ jobs:
       APP_NAME:     ${{ github.event.client_payload.app_name }}
       PACKAGE_NAME: ${{ github.event.client_payload.package_name }}
       PROJECT_URL:  ${{ github.event.client_payload.project_url }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
       - name: 🧩 Checkout repo
@@ -31,25 +39,95 @@ jobs:
           echo "PACKAGE_NAME=$PACKAGE_NAME"
           echo "PROJECT_URL=$PROJECT_URL"
 
-      - name: 📥 Download placeholder native ZIP
+      - name: 🏗 Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: ☕ Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # 1) Download ZIP from Worker (native project)
+      - name: 📥 Download native project ZIP
         run: |
           set -e
           if [ -z "$ZIP_URL" ]; then
-            echo "No ZIP_URL provided, skipping download."
-          else
-            echo "Downloading ZIP from $ZIP_URL"
-            curl -fSL "$ZIP_URL" -o project.zip
-            ls -lh project.zip || true
+            echo "ZIP_URL is empty – nothing to download."
+            exit 1
           fi
 
-      - name: 🏗 Simulated Android build
-        run: |
-          echo "Pretending to run Gradle build for now..."
-          echo "APP_NAME=$APP_NAME"
-          echo "PACKAGE_NAME=$PACKAGE_NAME"
-          echo "PROJECT_URL=$PROJECT_URL"
-          # TODO: unzip project.zip and run ./gradlew assembleRelease here later
+          echo "Downloading ZIP from $ZIP_URL"
+          curl -fSL "$ZIP_URL" -o project.zip
+          ls -lh project.zip
 
+      # 2) Unzip and detect Gradle root
+      - name: 📦 Unzip project & detect Gradle root
+        id: detect_root
+        run: |
+          set -e
+          mkdir -p project
+          unzip -o project.zip -d project
+
+          echo "Contents of project/:"
+          ls -R project || true
+
+          ROOT=""
+          if [ -f "project/gradlew" ]; then
+            ROOT="project"
+          elif [ -f "project/android/gradlew" ]; then
+            ROOT="project/android"
+          else
+            echo "Could not find gradlew in project or project/android"
+            exit 1
+          fi
+
+          echo "Using Gradle root: $ROOT"
+          echo "root=$ROOT" >> "$GITHUB_OUTPUT"
+
+      # 3) Run Gradle assembleRelease
+      - name: 🔨 Run Gradle assembleRelease
+        id: gradle_build
+        run: |
+          set -e
+          ROOT="${{ steps.detect_root.outputs.root }}"
+          echo "Gradle root: $ROOT"
+
+          chmod +x "$ROOT/gradlew" || true
+
+          cd "$ROOT"
+          echo "Running ./gradlew assembleRelease --warning-mode all"
+          ./gradlew assembleRelease --warning-mode all
+
+      # 4) Locate generated APK / AAB
+      - name: 🔍 Find release APK / AAB
+        id: find_apk
+        run: |
+          set -e
+          ROOT="${{ steps.detect_root.outputs.root }}"
+          cd "$ROOT"
+
+          APK_PATH=$(find . -type f \( -name "*release*.apk" -o -name "*release*.aab" \) | head -n 1 || true)
+
+          if [ -z "$APK_PATH" ]; then
+            echo "No release APK/AAB found under $ROOT"
+            exit 1
+          fi
+
+          echo "Found artifact at: $APK_PATH"
+          echo "apk_rel=$APK_PATH" >> "$GITHUB_OUTPUT"
+          echo "apk_full=$ROOT/$APK_PATH" >> "$GITHUB_OUTPUT"
+
+      # 5) Upload APK/AAB as GitHub Actions artifact
+      - name: 📤 Upload APK as Actions artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: novabridge-android-${{ env.BUILD_ID }}
+          path: ${{ steps.find_apk.outputs.apk_full }}
+          if-no-files-found: error
+          retention-days: 7
+
+      # 6) Notify Worker (success) with real artifact URL
       - name: ✅ Notify Worker (success)
         if: success()
         run: |
@@ -58,19 +136,51 @@ jobs:
             exit 0
           fi
 
-          echo "Notifying Worker of SUCCESS → $CALLBACK_URL"
+          if [ -z "$BUILD_ID" ]; then
+            echo "No BUILD_ID; cannot notify Worker."
+            exit 0
+          fi
+
+          echo "Fetching artifact download URL from GitHub API..."
+          API="https://api.github.com"
+          RUN_ID="${GITHUB_RUN_ID}"
+          REPO_FULL="${GITHUB_REPOSITORY}"         # owner/repo
+          ART_NAME="novabridge-android-${BUILD_ID}"
+
+          RESP=$(curl -sSL \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "$API/repos/$REPO_FULL/actions/runs/$RUN_ID/artifacts")
+
+          echo "Artifacts response:"
+          echo "$RESP" | jq '.artifacts | map({name, archive_download_url})'
+
+          ART_URL=$(echo "$RESP" | jq -r --arg name "$ART_NAME" \
+            '.artifacts[] | select(.name==$name) | .archive_download_url' | head -n 1)
+
+          if [ -z "$ART_URL" ] || [ "$ART_URL" = "null" ]; then
+            echo "Could not resolve artifact download URL – falling back to ZIP_URL"
+            ART_URL="$ZIP_URL"
+          fi
+
+          echo "Using artifact URL: $ART_URL"
+
           DATA=$(jq -n \
             --arg id  "$BUILD_ID" \
             --arg st  "success" \
-            --arg msg "GitHub Actions build completed successfully (simulated)" \
-            --arg art "$ZIP_URL" \
+            --arg msg "GitHub Actions Gradle build completed successfully" \
+            --arg art "$ART_URL" \
             '{build_id:$id,status:$st,message:$msg,artifact_url:$art}')
 
-          echo "Payload: $DATA"
+          echo "Callback payload:"
+          echo "$DATA"
+
+          echo "POST → $CALLBACK_URL"
           curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -d "$DATA"
 
+      # 7) Notify Worker (failure)
       - name: ❌ Notify Worker (failure)
         if: failure()
         run: |
@@ -79,8 +189,12 @@ jobs:
             exit 0
           fi
 
-          echo "Notifying Worker of FAILURE → $CALLBACK_URL"
-          MSG="GitHub Actions build failed – check workflow logs"
+          if [ -z "$BUILD_ID" ]; then
+            echo "No BUILD_ID; cannot notify Worker."
+            exit 0
+          fi
+
+          MSG="GitHub Actions Gradle build failed – check workflow logs"
 
           DATA=$(jq -n \
             --arg id  "$BUILD_ID" \
@@ -88,7 +202,9 @@ jobs:
             --arg msg "$MSG" \
             '{build_id:$id,status:$st,message:$msg}')
 
-          echo "Payload: $DATA"
+          echo "Failure callback payload:"
+          echo "$DATA"
+
           curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -d "$DATA"
