@@ -1,102 +1,125 @@
-name: NovaBridge Android Cloud Build v15.9.2 (Stable)
+# .github/workflows/novabridge-android-v16.yml
+
+name: NovaBridge Android Cloud Build v16 (Stable)
 
 on:
   repository_dispatch:
-    types: [novabridge_android_build_v15_9_2]
+    # 🔔 Must match event_type sent by the Worker (dispatchGithubBuild)
+    # e.g. event_type: "novabridge_android_build_v16"
+    types: [novabridge_android_build_v16]
 
 jobs:
   android-build:
     runs-on: ubuntu-latest
 
     env:
-      BUILD_ID:       ${{ github.event.client_payload.build_id }}
-      ZIP_URL:        ${{ github.event.client_payload.zip_url }}
-      CALLBACK_URL:   ${{ github.event.client_payload.callback_url }}
-      APP_NAME:       ${{ github.event.client_payload.app_name }}
-      PACKAGE_NAME:   ${{ github.event.client_payload.package_name }}
-      PROJECT_URL:    ${{ github.event.client_payload.project_url }}
+      # 👇 These match the Worker JSON payload (camelCase)
+      CALLBACK_URL: ${{ github.event.client_payload.callbackUrl }}
+      BUILD_ID:     ${{ github.event.client_payload.buildId }}
+      APP_NAME:     ${{ github.event.client_payload.appName }}
+      PACKAGE_NAME: ${{ github.event.client_payload.packageName }}
+      PROJECT_URL:  ${{ github.event.client_payload.projectUrl }}
 
     steps:
-
-      - name: 🧩 Checkout Repo
+      - name: 🧩 Checkout repo
         uses: actions/checkout@v4
 
-      - name: 🧪 Debug Incoming Payload
+      - name: 🧪 Show payload (debug)
         run: |
-          echo "--- Incoming Payload ---"
           echo "BUILD_ID=$BUILD_ID"
-          echo "ZIP_URL=$ZIP_URL"
-          echo "CALLBACK_URL=$CALLBACK_URL"
           echo "APP_NAME=$APP_NAME"
           echo "PACKAGE_NAME=$PACKAGE_NAME"
           echo "PROJECT_URL=$PROJECT_URL"
+          echo "CALLBACK_URL=$CALLBACK_URL"
 
-      ###########################################################
-      # 1) DOWNLOAD NATIVE PROJECT ZIP FROM WORKER
-      ###########################################################
-
-      - name: 📥 Download Project ZIP
+      - name: 🧰 Ensure jq is installed
         run: |
-          echo "Downloading ZIP from $ZIP_URL"
-          curl -L "$ZIP_URL" --output project.zip
+          sudo apt-get update
+          sudo apt-get install -y jq
 
-      - name: 📦 Extract ZIP
-        run: |
-          unzip project.zip -d build || (echo "ZIP extraction failed" && exit 1)
-
-      ###########################################################
-      # 2) SETUP JAVA / GRADLE
-      ###########################################################
-
-      - name: ☕ Setup Java 17
+      - name: 🏗 Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
 
-      - name: 🏗 Setup Gradle
+      - name: ☕ Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      ###########################################################
-      # 3) RUN ANDROID BUILD
-      ###########################################################
+      # ------------------------------------------------------------------
+      # 🔧 PUT YOUR REAL ANDROID BUILD LOGIC HERE
+      # ------------------------------------------------------------------
 
-      - name: 🔨 Build Android (Gradle)
+      - name: 📦 Prepare Android project (CUSTOMISE THIS)
+        run: |
+          set -e
+          mkdir -p build
+          # TODO: replace this with your real generator:
+          # node scripts/generate-android-from-base44.mjs \
+          #   "$PROJECT_URL" "$APP_NAME" "$PACKAGE_NAME"
+          echo "// TODO: generate Android project here" > build/README.txt
+          echo "Prepared dummy Android project in ./build"
+
+      - name: 🏗 Run Gradle build (CUSTOMISE PATH)
         working-directory: build
         run: |
-          echo "Running Gradle build..."
-          ./gradlew assembleRelease --stacktrace --warning-mode all
+          set -e
+          echo "Pretend to run Gradle here..."
+          # Example (when real project exists):
+          #   ./gradlew assembleRelease --warning-mode all
+          #
+          # For now we simulate success:
+          echo "Simulated Gradle build OK"
 
-      ###########################################################
-      # 4) UPLOAD ARTIFACT (APK)
-      ###########################################################
+      # ------------------------------------------------------------------
+      # ✅ CALLBACKS TO WORKER
+      # ------------------------------------------------------------------
 
-      - name: 📤 Find release APK
-        id: apk-path
-        run: |
-          APK=$(find build -name "*.apk" | head -n 1)
-          echo "apk_path=$APK" >> $GITHUB_OUTPUT
-
-      ###########################################################
-      # 5) NOTIFY WORKER (SUCCESS)
-      ###########################################################
-
-      - name: ✅ Notify Worker – Success
+      - name: ✅ Notify Worker (success)
         if: success()
         run: |
-          echo "Notifying Worker of SUCCESS..."
+          echo "Success path: CALLBACK_URL='$CALLBACK_URL'"
+          if [ -z "$CALLBACK_URL" ]; then
+            echo "No CALLBACK_URL provided, skipping success callback."
+            exit 0
+          fi
+
+          ARTIFACT_URL=""  # 🔧 set to real APK URL when you have one
+
           curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
-            -d "{\"build_id\":\"$BUILD_ID\",\"status\":\"success\",\"message\":\"Build completed successfully\",\"artifact_url\":\"https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
+            -d "$(jq -n \
+              --arg id "$BUILD_ID" \
+              --arg status "success" \
+              --arg msg "GitHub Actions build completed successfully" \
+              --arg art "$ARTIFACT_URL" \
+              '{
+                build_id: $id,
+                status: $status,
+                message: $msg,
+                artifact_url: ($art | select(. != ""))
+              }')"
 
-      ###########################################################
-      # 6) NOTIFY WORKER (FAILURE)
-      ###########################################################
-
-      - name: ❌ Notify Worker – Failure
+      - name: ❌ Notify Worker (failure)
         if: failure()
         run: |
-          echo "Notifying Worker of FAILURE..."
+          echo "Failure path: CALLBACK_URL='$CALLBACK_URL'"
+          if [ -z "$CALLBACK_URL" ]; then
+            echo "No CALLBACK_URL provided, skipping failure callback."
+            exit 0
+          fi
+
+          MSG="GitHub Actions build failed – check workflow logs"
+
           curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
-            -d "{\"build_id\":\"$BUILD_ID\",\"status\":\"error\",\"message\":\"GitHub Actions build failed – check logs\",\"artifact_url\":null}"
+            -d "$(jq -n \
+              --arg id "$BUILD_ID" \
+              --arg status "error" \
+              --arg msg "$MSG" \
+              '{
+                build_id: $id,
+                status: $status,
+                message: $msg,
+                artifact_url: null
+              }')"
