@@ -4,16 +4,30 @@ on:
   workflow_dispatch:
     inputs:
       buildId:
-        description: "NovaBridge Build ID"
-        required: true
+        description: "NovaBridge Build ID (camelCase)"
+        required: false
         type: string
+      build_id:
+        description: "NovaBridge Build ID (snake_case)"
+        required: false
+        type: string
+
       zipUrl:
-        description: "ZIP URL from NovaBridge Build Worker"
-        required: true
+        description: "ZIP URL (camelCase)"
+        required: false
         type: string
+      zip_url:
+        description: "ZIP URL (snake_case)"
+        required: false
+        type: string
+
       callbackUrl:
-        description: "Worker callback URL (…/api/builds/callback)"
-        required: true
+        description: "Callback URL (camelCase)"
+        required: false
+        type: string
+      callback_url:
+        description: "Callback URL (snake_case)"
+        required: false
         type: string
 
 jobs:
@@ -21,261 +35,96 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      BUILD_ID: ${{ github.event.inputs.buildId }}
-      ZIP_URL: ${{ github.event.inputs.zipUrl }}
-      CALLBACK_URL: ${{ github.event.inputs.callbackUrl }}
+      # Merge both camelCase + snake_case inputs
+      BUILD_ID: ${{ github.event.inputs.buildId || github.event.inputs.build_id }}
+      ZIP_URL: ${{ github.event.inputs.zipUrl || github.event.inputs.zip_url }}
+      CALLBACK_URL: ${{ github.event.inputs.callbackUrl || github.event.inputs.callback_url }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Show workflow inputs
+      - name: Show merged inputs
         run: |
-          echo "Build ID: $BUILD_ID"
-          echo "ZIP URL: $ZIP_URL"
-          echo "Callback URL: $CALLBACK_URL"
+          echo "BUILD_ID=$BUILD_ID"
+          echo "ZIP_URL=$ZIP_URL"
+          echo "CALLBACK_URL=$CALLBACK_URL"
 
-      # 1️⃣ Preparing Environment (5%)
-      - name: Notify worker – preparing environment
+      # 1️⃣ Preparing Environment
+      - name: Callback – preparing
         run: |
           curl -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -d @- <<JSON
-          {
-            "id": "$BUILD_ID",
-            "status": "running",
-            "phase": "cloud",
-            "step": "preparing",
-            "message": "Preparing environment",
-            "progress": {
-              "percent": 5,
-              "stepIndex": 1,
-              "stepsTotal": 8,
-              "stepLabel": "Preparing Environment",
-              "status": "running"
-            }
-          }
-          JSON
+          -H "Content-Type: application/json" \
+          -d "{\"id\":\"$BUILD_ID\",\"status\":\"running\",\"progress\":{\"percent\":5,\"stepLabel\":\"Preparing Environment\"}}"
 
-      # 2️⃣ Download native project ZIP (from Worker / R2)
-      - name: Download native ZIP
+      # 2️⃣ Download ZIP
+      - name: Download ZIP
         run: |
-          echo "Downloading ZIP from: $ZIP_URL"
+          echo "Downloading ZIP from $ZIP_URL"
           curl -fSL "$ZIP_URL" -o native.zip
-          ls -lah
 
-      # 3️⃣ Extracting Native Project (15%)
-      - name: Notify worker – extracting project
-        run: |
-          curl -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -d @- <<JSON
-          {
-            "id": "$BUILD_ID",
-            "status": "running",
-            "phase": "cloud",
-            "step": "extracting",
-            "message": "Extracting native project",
-            "progress": {
-              "percent": 15,
-              "stepIndex": 2,
-              "stepsTotal": 8,
-              "stepLabel": "Extracting Native Project",
-              "status": "running"
-            }
-          }
-          JSON
-
-      - name: Unzip project
+      # 3️⃣ Extract ZIP
+      - name: Extract ZIP
         run: |
           mkdir -p build
           unzip -q native.zip -d build
-          echo "Top-level build contents:"
-          ls -R build | head
 
-      # 4️⃣ Project Extracted (25%)
-      - name: Notify worker – project extracted
+      - name: Callback – extracted
         run: |
           curl -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -d @- <<JSON
-          {
-            "id": "$BUILD_ID",
-            "status": "running",
-            "phase": "cloud",
-            "step": "project-extracted",
-            "message": "Project extracted",
-            "progress": {
-              "percent": 25,
-              "stepIndex": 3,
-              "stepsTotal": 8,
-              "stepLabel": "Project Extracted",
-              "status": "running"
-            }
-          }
-          JSON
+          -H "Content-Type: application/json" \
+          -d "{\"id\":\"$BUILD_ID\",\"progress\":{\"percent\":25,\"stepLabel\":\"Project Extracted\"}}"
 
-      # JDK for Gradle
+      # 4️⃣ Install JDK for Gradle
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      # 5️⃣ Running Build Tasks (50%)
-      - name: Notify worker – running Gradle build
+      # 5️⃣ Run Gradle build
+      - name: Callback – running build
         run: |
           curl -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -d @- <<JSON
-          {
-            "id": "$BUILD_ID",
-            "status": "running",
-            "phase": "cloud",
-            "step": "gradle-build",
-            "message": "Running Gradle assembleRelease",
-            "progress": {
-              "percent": 50,
-              "stepIndex": 4,
-              "stepsTotal": 8,
-              "stepLabel": "Running Build Tasks",
-              "status": "running"
-            }
-          }
-          JSON
+          -H "Content-Type: application/json" \
+          -d "{\"id\":\"$BUILD_ID\",\"progress\":{\"percent\":50,\"stepLabel\":\"Running Build Tasks\"}}"
 
-      - name: Run Gradle assembleRelease (system Gradle, ROOT=build)
+      - name: Run assembleRelease
         working-directory: build
         run: |
-          echo "Using ROOT: build"
           gradle :app:assembleRelease --warning-mode all
 
-      # 6️⃣ Packaging APK (75%)
-      - name: Notify worker – packaging APK
-        if: success()
-        run: |
-          curl -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -d @- <<JSON
-          {
-            "id": "$BUILD_ID",
-            "status": "running",
-            "phase": "cloud",
-            "step": "packaging",
-            "message": "Packaging APK",
-            "progress": {
-              "percent": 75,
-              "stepIndex": 5,
-              "stepsTotal": 8,
-              "stepLabel": "Packaging APK",
-              "status": "running"
-            }
-          }
-          JSON
-
-      - name: Find release APK
+      # 6️⃣ Find APK
+      - name: Find APK
         id: find_apk
         working-directory: build
         run: |
-          APK_PATH=$(find . -type f -name "*release*.apk" | head -n 1 || true)
-          if [ -z "$APK_PATH" ]; then
-            echo "No APK found!" >&2
-            exit 1
-          fi
-          echo "Found APK at: $APK_PATH"
-          echo "APK_PATH=$APK_PATH" >> "$GITHUB_OUTPUT"
+          APK=$(find . -name "*release*.apk" | head -n 1)
+          echo "APK_PATH=$APK" >> $GITHUB_OUTPUT
 
-      # 7️⃣ Uploading to R2 (90%) – via Worker helper endpoint
-      - name: Notify worker – uploading to R2
-        if: success()
+      # 7️⃣ Upload APK to Worker → R2
+      - name: Upload APK to R2
+        id: upload_apk
         run: |
-          curl -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -d @- <<JSON
-          {
-            "id": "$BUILD_ID",
-            "status": "running",
-            "phase": "cloud",
-            "step": "uploading",
-            "message": "Uploading APK to R2",
-            "progress": {
-              "percent": 90,
-              "stepIndex": 6,
-              "stepsTotal": 8,
-              "stepLabel": "Uploading to R2",
-              "status": "running"
-            }
-          }
-          JSON
-
-      - name: Upload APK to R2 via Worker
-        id: upload_r2
-        env:
-          APK_PATH: ${{ steps.find_apk.outputs.APK_PATH }}
-        run: |
-          # Derive worker base URL from callback URL (strip /api/builds/callback)
           BASE_URL="${CALLBACK_URL%/api/builds/callback}"
-          echo "Worker base URL: $BASE_URL"
-
-          echo "Uploading APK: $APK_PATH"
+          APK="${{ steps.find_apk.outputs.APK_PATH }}"
           RESP=$(curl -fSL -X POST "$BASE_URL/api/builds/$BUILD_ID/upload-apk" \
-            -H "Content-Type: application/octet-stream" \
-            --data-binary @"build/$APK_PATH")
-          echo "Upload response: $RESP"
+             -H "Content-Type: application/octet-stream" \
+             --data-binary @"build/$APK")
+          echo "$RESP"
 
-          ARTIFACT_URL=$(echo "$RESP" | jq -r '.artifactUrl // empty')
-          if [ -z "$ARTIFACT_URL" ]; then
-            echo "No artifactUrl in response" >&2
-            exit 1
-          fi
-
-          echo "ARTIFACT_URL=$ARTIFACT_URL" >> "$GITHUB_OUTPUT"
-
-      # 8️⃣ Build Complete (100%) – success callback
-      - name: Notify worker – build complete
+      # 8️⃣ Success callback
+      - name: Callback – complete
         if: success()
-        env:
-          ARTIFACT_URL: ${{ steps.upload_r2.outputs.ARTIFACT_URL }}
         run: |
           curl -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -d @- <<JSON
-          {
-            "id": "$BUILD_ID",
-            "status": "success",
-            "phase": "cloud",
-            "step": "complete",
-            "message": "Build complete",
-            "artifactUrl": "$ARTIFACT_URL",
-            "progress": {
-              "percent": 100,
-              "stepIndex": 7,
-              "stepsTotal": 8,
-              "stepLabel": "Build Complete",
-              "status": "success"
-            }
-          }
-          JSON
+          -H "Content-Type: application/json" \
+          -d "{\"id\":\"$BUILD_ID\",\"status\":\"success\",\"progress\":{\"percent\":100,\"stepLabel\":\"Build Complete\"}}"
 
-      # ❌ Error path – tell Worker / UI the build failed (but keep all logs in Actions)
-      - name: Notify worker – error
+      # ❌ Error callback
+      - name: Callback – error
         if: failure()
         run: |
           curl -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -d @- <<JSON
-          {
-            "id": "$BUILD_ID",
-            "status": "error",
-            "phase": "cloud",
-            "step": "error",
-            "message": "GitHub Actions build failed – check workflow logs",
-            "progress": {
-              "percent": 50,
-              "stepIndex": 4,
-              "stepsTotal": 8,
-              "stepLabel": "Running Build Tasks",
-              "status": "error"
-            }
-          }
-          JSON
+          -H "Content-Type: application/json" \
+          -d "{\"id\":\"$BUILD_ID\",\"status\":\"error\",\"message\":\"Build failed – see GitHub logs\"}"
