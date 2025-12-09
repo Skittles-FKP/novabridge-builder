@@ -1,125 +1,50 @@
-# .github/workflows/novabridge-android-v16.yml
-
-name: NovaBridge Android Cloud Build v16 (Stable)
+name: NovaBridge Android Cloud Build v16.1
 
 on:
   repository_dispatch:
-    # 🔔 Must match event_type sent by the Worker (dispatchGithubBuild)
-    # e.g. event_type: "novabridge_android_build_v16"
-    types: [novabridge_android_build_v16]
+    types: [novabridge_android_build_v16_1]
 
 jobs:
-  android-build:
+  build-android:
     runs-on: ubuntu-latest
 
     env:
-      # 👇 These match the Worker JSON payload (camelCase)
-      CALLBACK_URL: ${{ github.event.client_payload.callbackUrl }}
-      BUILD_ID:     ${{ github.event.client_payload.buildId }}
-      APP_NAME:     ${{ github.event.client_payload.appName }}
-      PACKAGE_NAME: ${{ github.event.client_payload.packageName }}
-      PROJECT_URL:  ${{ github.event.client_payload.projectUrl }}
+      BUILD_ID: ${{ github.event.client_payload.build_id }}
+      CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
+      PROJECT_URL: ${{ github.event.client_payload.project_url }}
+      APP_NAME: ${{ github.event.client_payload.app_name }}
+      PACKAGE_NAME: ${{ github.event.client_payload.package_name }}
 
     steps:
-      - name: 🧩 Checkout repo
-        uses: actions/checkout@v4
 
-      - name: 🧪 Show payload (debug)
+      - name: Show payload
         run: |
           echo "BUILD_ID=$BUILD_ID"
-          echo "APP_NAME=$APP_NAME"
-          echo "PACKAGE_NAME=$PACKAGE_NAME"
-          echo "PROJECT_URL=$PROJECT_URL"
           echo "CALLBACK_URL=$CALLBACK_URL"
+          echo "PROJECT_URL=$PROJECT_URL"
 
-      - name: 🧰 Ensure jq is installed
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y jq
-
-      - name: 🏗 Setup Java
+      - name: Install Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: ☕ Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-      # ------------------------------------------------------------------
-      # 🔧 PUT YOUR REAL ANDROID BUILD LOGIC HERE
-      # ------------------------------------------------------------------
+      - name: Fake Android Build (replace later)
+        run: echo "SUCCESS"
 
-      - name: 📦 Prepare Android project (CUSTOMISE THIS)
-        run: |
-          set -e
-          mkdir -p build
-          # TODO: replace this with your real generator:
-          # node scripts/generate-android-from-base44.mjs \
-          #   "$PROJECT_URL" "$APP_NAME" "$PACKAGE_NAME"
-          echo "// TODO: generate Android project here" > build/README.txt
-          echo "Prepared dummy Android project in ./build"
-
-      - name: 🏗 Run Gradle build (CUSTOMISE PATH)
-        working-directory: build
-        run: |
-          set -e
-          echo "Pretend to run Gradle here..."
-          # Example (when real project exists):
-          #   ./gradlew assembleRelease --warning-mode all
-          #
-          # For now we simulate success:
-          echo "Simulated Gradle build OK"
-
-      # ------------------------------------------------------------------
-      # ✅ CALLBACKS TO WORKER
-      # ------------------------------------------------------------------
-
-      - name: ✅ Notify Worker (success)
+      - name: Notify Worker (SUCCESS)
         if: success()
         run: |
-          echo "Success path: CALLBACK_URL='$CALLBACK_URL'"
-          if [ -z "$CALLBACK_URL" ]; then
-            echo "No CALLBACK_URL provided, skipping success callback."
-            exit 0
-          fi
-
-          ARTIFACT_URL=""  # 🔧 set to real APK URL when you have one
-
           curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
-            -d "$(jq -n \
-              --arg id "$BUILD_ID" \
-              --arg status "success" \
-              --arg msg "GitHub Actions build completed successfully" \
-              --arg art "$ARTIFACT_URL" \
-              '{
-                build_id: $id,
-                status: $status,
-                message: $msg,
-                artifact_url: ($art | select(. != ""))
-              }')"
+            -d "{\"build_id\":\"$BUILD_ID\",\"status\":\"success\",\"step\":\"complete\",\"percent\":100}"
 
-      - name: ❌ Notify Worker (failure)
+      - name: Notify Worker (FAILURE)
         if: failure()
         run: |
-          echo "Failure path: CALLBACK_URL='$CALLBACK_URL'"
-          if [ -z "$CALLBACK_URL" ]; then
-            echo "No CALLBACK_URL provided, skipping failure callback."
-            exit 0
-          fi
-
-          MSG="GitHub Actions build failed – check workflow logs"
-
           curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
-            -d "$(jq -n \
-              --arg id "$BUILD_ID" \
-              --arg status "error" \
-              --arg msg "$MSG" \
-              '{
-                build_id: $id,
-                status: $status,
-                message: $msg,
-                artifact_url: null
-              }')"
+            -d "{\"build_id\":\"$BUILD_ID\",\"status\":\"error\",\"step\":\"error\",\"percent\":50}"
