@@ -35,8 +35,10 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: 🧱 Setup Gradle
+      - name: 🧱 Setup Gradle (pin 8.2.1)
         uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.2.1
 
       - name: 📥 Download and unzip native project
         run: |
@@ -67,7 +69,8 @@ jobs:
             echo "Using Gradle Wrapper..."
             ./gradlew assembleRelease --warning-mode all || ./gradlew assembleDebug --warning-mode all
           else
-            echo "No Gradle wrapper found, using system gradle..."
+            echo "No Gradle wrapper found, using system gradle (8.2.1)..."
+            gradle --version
             gradle assembleRelease --warning-mode all || gradle assembleDebug --warning-mode all
           fi
 
@@ -93,7 +96,7 @@ jobs:
           name: novabridge-android-apk-${{ env.BUILD_ID }}
           path: build/project/${{ steps.find_apk.outputs.apk-path }}
 
-      # Optional: notify Worker callback (if you later add /api/builds/callback)
+      # Optional: notify Worker callback (if you’re using /api/builds/callback)
       - name: ✅ Notify Worker (success)
         if: success() && env.CALLBACK_URL != ''
         run: |
