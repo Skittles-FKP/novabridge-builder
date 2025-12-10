@@ -107,19 +107,20 @@ jobs:
 
           echo "Uploading APK to R2:"
           echo "➡️ Source: $APK"
-          echo "➡️ Destination: s3://${R2_BUCKET}/${DEST_PATH}"
+          echo "➡️ Destination (S3 endpoint): s3://${R2_BUCKET}/${DEST_PATH}"
 
+          # Write to R2 via the S3-compatible endpoint
           AWS_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID}" \
           AWS_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY}" \
           aws s3 cp "$APK" "s3://${R2_BUCKET}/${DEST_PATH}" \
             --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
             --region auto
 
-          # ✅ Correct public URL (path-style):
-          # https://<ACCOUNT_ID>.r2.cloudflarestorage.com/<BUCKET>/<KEY>
-          APK_URL="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${R2_BUCKET}/${DEST_PATH}"
+          # PUBLIC URL (no auth) via r2.dev – requires R2.dev/public access enabled
+          APK_URL="https://${R2_BUCKET}.r2.dev/${DEST_PATH}"
+
           echo "apk_url=$APK_URL" >> $GITHUB_OUTPUT
-          echo "✅ APK uploaded to: $APK_URL"
+          echo "✅ APK uploaded. Public URL: $APK_URL"
 
       # ------------------------------
       # SEND CALLBACK TO WORKER (SUCCESS)
