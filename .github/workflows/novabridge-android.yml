@@ -115,7 +115,8 @@ jobs:
             --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
             --region auto
 
-          APK_URL="https://${R2_BUCKET}.${R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${DEST_PATH}"
+          # ✅ FIXED PUBLIC URL
+          APK_URL="https://${R2_BUCKET}.r2.dev/${DEST_PATH}"
           echo "apk_url=$APK_URL" >> $GITHUB_OUTPUT
           echo "✅ APK uploaded to: $APK_URL"
 
