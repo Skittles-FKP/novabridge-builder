@@ -1,7 +1,10 @@
 name: NovaBridge Android Cloud Build v16.9
 
 on:
+  # Allow manual run
   workflow_dispatch:
+
+  # Triggered by Worker repository_dispatch event
   repository_dispatch:
     types: [novabridge_android_build_v16_9]
 
@@ -47,35 +50,54 @@ jobs:
 
           mkdir -p build
           unzip -q native.zip -d build
+
+          echo "📂 Listing extracted content:"
           ls -R build
 
+      # ------------------------------
+      # MAIN BUILD STEP (runs inside build/)
+      # ------------------------------
       - name: 🏗 Build APK (Release → Debug fallback)
         working-directory: build
         run: |
           set -e
+          echo "📂 Build directory:"
+          ls -la
+
           if [ -x "./gradlew" ]; then
+            echo "✔ Using Gradle Wrapper"
             ./gradlew assembleRelease --warning-mode all || ./gradlew assembleDebug --warning-mode all
           else
+            echo "⚠️ No gradlew found, using system Gradle"
             gradle assembleRelease --warning-mode all || gradle assembleDebug --warning-mode all
           fi
 
+      # ------------------------------
+      # FIND THE PRODUCED APK
+      # ------------------------------
       - name: 🔍 Locate APK
         id: find_apk
         working-directory: build
         run: |
           set -e
+          echo "Searching for APKs inside app/build/outputs..."
+
           APK_PATH=$(find app/build/outputs/apk -type f \
             \( -name "*release*.apk" -o -name "*debug*.apk" \) | head -n 1 || true)
 
           if [ -z "$APK_PATH" ]; then
-            echo "❌ No APK found!"
+            echo "❌ No APK found"
+            find app/build -type f | sed 's/^/  /'
             exit 1
           fi
 
-          echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
           echo "✔ Found APK: $APK_PATH"
+          echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
 
-      - name: ☁️ Upload APK to R2 (PUBLIC URL FIXED)
+      # ------------------------------
+      # UPLOAD TO CLOUDFLARE R2
+      # ------------------------------
+      - name: ☁️ Upload APK to R2
         id: upload_r2
         run: |
           set -e
@@ -83,37 +105,56 @@ jobs:
           APK="build/${{ steps.find_apk.outputs.apk_path }}"
           DEST_PATH="apks/${BUILD_ID}.apk"
 
-          echo "Uploading APK → R2"
+          echo "Uploading APK to R2:"
+          echo "➡️ Source: $APK"
+          echo "➡️ Destination: s3://${R2_BUCKET}/${DEST_PATH}"
+
           AWS_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID}" \
           AWS_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY}" \
           aws s3 cp "$APK" "s3://${R2_BUCKET}/${DEST_PATH}" \
             --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
             --region auto
 
-          PUBLIC_URL="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${R2_BUCKET}/${DEST_PATH}"
+          INTERNAL_R2_URL="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${R2_BUCKET}/${DEST_PATH}"
+          echo "ℹ️ Internal R2 URL (not public): $INTERNAL_R2_URL"
 
-          echo "public_r2_url=$PUBLIC_URL" >> $GITHUB_OUTPUT
-          echo "✅ PUBLIC APK URL: $PUBLIC_URL"
+          # ✅ Public-facing download URL via Worker proxy
+          APK_URL="https://novabridge-build-worker.novabridge.workers.dev/apk/${BUILD_ID}"
 
-      - name: ✅ Notify Worker — success
+          echo "apk_url=$APK_URL" >> $GITHUB_OUTPUT
+          echo "✅ APK will be downloadable at: $APK_URL"
+
+      # ------------------------------
+      # SEND CALLBACK TO WORKER (SUCCESS)
+      # ------------------------------
+      - name: ✅ Notify Worker – success
         if: success() && env.CALLBACK_URL != ''
         run: |
+          set -e
+          APK_URL="${{ steps.upload_r2.outputs.apk_url }}"
+          echo "🔔 Notifying Worker of SUCCESS. BUILD_ID=${BUILD_ID}"
+          echo "🔗 APK_URL=${APK_URL}"
+
           curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -d "$(jq -n \
-              --arg id "$BUILD_ID" \
-              --arg status "success" \
-              --arg url "${{ steps.upload_r2.outputs.public_r2_url }}" \
-              --arg msg "Android build completed successfully" \
-              '{build_id:$id, status:$status, artifact_url:$url, public_r2_url:$url, message:$msg}')"
+                --arg id "$BUILD_ID" \
+                --arg status "success" \
+                --arg art "$APK_URL" \
+                --arg msg "Android build completed successfully" \
+                '{build_id:$id, status:$status, artifact_url:$art, message:$msg}')"
 
-      - name: ❌ Notify Worker — failure
+      # ------------------------------
+      # SEND CALLBACK TO WORKER (FAILURE)
+      # ------------------------------
+      - name: ❌ Notify Worker – failure
         if: failure() && env.CALLBACK_URL != ''
         run: |
+          echo "🔔 Notifying Worker of FAILURE. BUILD_ID=${BUILD_ID}"
           curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -d "$(jq -n \
-              --arg id "$BUILD_ID" \
-              --arg status "error" \
-              --arg msg "Android build failed – check logs" \
-              '{build_id:$id, status:$status, artifact_url:null, message:$msg}')"
+                --arg id "$BUILD_ID" \
+                --arg status "error" \
+                --arg msg "Android build failed – check logs" \
+                '{build_id:$id, status:$status, artifact_url:null, message:$msg}')"
