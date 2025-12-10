@@ -115,8 +115,9 @@ jobs:
             --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
             --region auto
 
-          # ✅ Correct public URL for bucket with hyphen: <bucket>.<account>.r2.dev/<key>
-          APK_URL="https://${R2_BUCKET}.${R2_ACCOUNT_ID}.r2.dev/${DEST_PATH}"
+          # ✅ Correct public URL (path-style):
+          # https://<ACCOUNT_ID>.r2.cloudflarestorage.com/<BUCKET>/<KEY>
+          APK_URL="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${R2_BUCKET}/${DEST_PATH}"
           echo "apk_url=$APK_URL" >> $GITHUB_OUTPUT
           echo "✅ APK uploaded to: $APK_URL"
 
