@@ -1,11 +1,10 @@
 name: NovaBridge Android Cloud Build v16.8
 
 on:
-  # Main: Worker repository_dispatch
   repository_dispatch:
     types: [novabridge_android_build_v16_8]
 
-  # Optional: manual trigger for debugging (no payload!)
+  # Optional (manual trigger for testing)
   workflow_dispatch:
 
 jobs:
@@ -13,16 +12,9 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # From repository_dispatch client_payload
       BUILD_ID: ${{ github.event.client_payload.build_id }}
       ZIP_URL: ${{ github.event.client_payload.zip_url }}
       CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
-
-      # R2 secrets (configure in repo settings)
-      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      R2_BUCKET: ${{ secrets.R2_BUCKET }}
-      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
 
     steps:
       - name: 🧩 Checkout repository
@@ -40,123 +32,114 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: 🧱 Setup Gradle 8.2.1
+      - name: 🧱 Setup Gradle
         uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: 8.2.1
 
-      - name: 📥 Download and unzip native project
+      - name: 📥 Download and unzip native Android project
         run: |
           set -e
-
           if [ -z "$ZIP_URL" ]; then
-            echo "❌ ZIP_URL missing in repository_dispatch payload"
+            echo "❌ ZIP_URL missing from dispatch payload"
             exit 1
           fi
-
-          mkdir -p build/project
 
           echo "Downloading ZIP from: $ZIP_URL"
           curl -L "$ZIP_URL" -o project.zip
 
-          echo "Unzipping to ./build/project..."
-          unzip -q project.zip -d build/project
+          mkdir -p build
+          unzip -q project.zip -d build
 
-          echo "Contents of ./build/project:"
-          ls -R build/project
+          echo "Contents of ./build:"
+          ls -R build
 
       - name: 🏗 Run Gradle build (release → debug fallback)
         working-directory: build/project
         run: |
           set -e
-          echo "Listing project root (build/project):"
+          echo "📂 Listing project root:"
           ls -la
 
-          if command -v gradle >/dev/null 2>&1; then
-            echo "Using system Gradle (via setup-gradle 8.2.1)..."
-            gradle --version
-          fi
-
           if [ -x "./gradlew" ]; then
-            echo "Using Gradle Wrapper..."
+            echo "Using Gradle Wrapper"
             ./gradlew assembleRelease --warning-mode all || ./gradlew assembleDebug --warning-mode all
           else
-            echo "No Gradle wrapper found, using system gradle..."
+            echo "➡️ Running system Gradle"
             gradle assembleRelease --warning-mode all || gradle assembleDebug --warning-mode all
           fi
 
-      - name: 🔍 Locate built APK
+      - name: 🔍 Locate built APK (v16.8 fix)
         id: find_apk
         working-directory: build/project
         run: |
           set -e
-          echo "Searching for *.apk under app/build/outputs..."
-          APK_PATH=$(find app/build/outputs -type f -name "*.apk" | head -n 1 || true)
+          echo "Searching for APKs…"
+
+          APK_PATH=$(find app/build/outputs/apk -type f \
+            \( -name "*release*.apk" -o -name "*debug*.apk" \) \
+            | head -n 1 || true)
 
           if [ -z "$APK_PATH" ]; then
-            echo "❌ No APK produced!"
+            echo "❌ No APK found!"
+            echo "All output files:"
+            find app/build -type f | sed 's/^/  /'
             exit 1
           fi
 
           echo "Found APK at: $APK_PATH"
-          echo "apk_path=$APK_PATH" >> "$GITHUB_OUTPUT"
+          echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
 
       - name: ☁️ Upload APK to Cloudflare R2
-        id: upload_r2
-        env:
-          AWS_ACCESS_KEY_ID: ${{ env.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ env.R2_SECRET_ACCESS_KEY }}
-          AWS_EC2_METADATA_DISABLED: "true"
         run: |
           set -e
 
           if [ -z "${{ steps.find_apk.outputs.apk_path }}" ]; then
-            echo "❌ apk_path output not found"
+            echo "❌ APK path missing"
             exit 1
           fi
 
           APK_PATH="${{ steps.find_apk.outputs.apk_path }}"
           DEST_PATH="apks/${BUILD_ID}.apk"
 
-          echo "Uploading $APK_PATH to R2 bucket s3://${R2_BUCKET}/${DEST_PATH}"
+          echo "Configuring AWS CLI for Cloudflare R2…"
+          aws configure set aws_access_key_id "${{ secrets.R2_ACCESS_KEY_ID }}"
+          aws configure set aws_secret_access_key "${{ secrets.R2_SECRET_ACCESS_KEY }}"
+          aws configure set default.region us-east-1
+
+          echo "Uploading $APK_PATH → s3://${{ secrets.R2_BUCKET }}/$DEST_PATH"
 
           aws s3 cp "$APK_PATH" \
-            "s3://${R2_BUCKET}/${DEST_PATH}" \
-            --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
-            --region auto
+            "s3://${{ secrets.R2_BUCKET }}/$DEST_PATH" \
+            --endpoint-url "https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
 
-          ARTIFACT_URL="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${R2_BUCKET}/${DEST_PATH}"
+          ARTIFACT_URL="https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com/${{ secrets.R2_BUCKET }}/$DEST_PATH"
 
-          echo "ARTIFACT_URL=$ARTIFACT_URL"
-          echo "artifact_url=$ARTIFACT_URL" >> "$GITHUB_OUTPUT"
+          echo "artifact_url=$ARTIFACT_URL" >> $GITHUB_ENV
+          echo "APK uploaded successfully: $ARTIFACT_URL"
 
       - name: ✅ Notify Worker (success)
-        if: success() && env.CALLBACK_URL != ''
+        if: success()
         run: |
           set -e
-          ARTIFACT_URL="${{ steps.upload_r2.outputs.artifact_url }}"
-
-          echo "Notifying Worker: success → ${CALLBACK_URL}"
+          echo "Notifying Worker SUCCESS → ${CALLBACK_URL}"
           curl -X POST "${CALLBACK_URL}" \
             -H "Content-Type: application/json" \
             -d "$(jq -n \
               --arg id "$BUILD_ID" \
               --arg status "success" \
-              --arg msg "GitHub Actions build completed successfully" \
               --arg art "$ARTIFACT_URL" \
-              '{build_id: $id, status: $status, message: $msg, artifact_url: $art}')"
+              --arg msg "Build completed successfully" \
+              '{build_id: $id, status: $status, artifact_url: $art, message: $msg}')"
 
       - name: ❌ Notify Worker (failure)
-        if: failure() && env.CALLBACK_URL != ''
+        if: failure()
         run: |
           set -e
-          MSG="GitHub Actions build failed – check workflow logs"
-
-          echo "Notifying Worker: failure → ${CALLBACK_URL}"
+          MSG="GitHub Actions Android build failed"
+          echo "Notifying Worker FAILURE → ${CALLBACK_URL}"
           curl -X POST "${CALLBACK_URL}" \
             -H "Content-Type: application/json" \
             -d "$(jq -n \
               --arg id "$BUILD_ID" \
               --arg status "error" \
               --arg msg "$MSG" \
-              '{build_id: $id, status: $status, message: $msg, artifact_url: null}')"
+              '{build_id: $id, status: $status, message: $msg}')"
