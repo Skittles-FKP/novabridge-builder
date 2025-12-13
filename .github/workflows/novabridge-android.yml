@@ -16,7 +16,6 @@ jobs:
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       R2_BUCKET: ${{ secrets.R2_BUCKET }}
-      R2_SECRET_ACCESS_KEY_ID: ${{ secrets.R2_SECRET_ACCESS_KEY_ID }}
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
 
     steps:
@@ -28,6 +27,7 @@ jobs:
           echo "BUILD_ID=${BUILD_ID}"
           echo "ZIP_URL=${ZIP_URL}"
           echo "CALLBACK_URL=${CALLBACK_URL}"
+          echo "HOME=${HOME}"
 
       - name: ☕ Setup Java 17
         uses: actions/setup-java@v4
@@ -40,16 +40,48 @@ jobs:
         with:
           gradle-version: "8.2.1"
 
+      # ✅ FIX: ensure the keystore exists (Gradle expects /home/runner/.android/debug.keystore)
+      - name: 🔐 Ensure Android debug.keystore exists (required for signing)
+        run: |
+          set -e
+          echo "JAVA_HOME=$JAVA_HOME"
+          mkdir -p "$HOME/.android"
+
+          if [ ! -f "$HOME/.android/debug.keystore" ]; then
+            echo "Creating $HOME/.android/debug.keystore..."
+            "$JAVA_HOME/bin/keytool" -genkeypair \
+              -keystore "$HOME/.android/debug.keystore" \
+              -storepass android \
+              -keypass android \
+              -alias androiddebugkey \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          else
+            echo "debug.keystore already exists."
+          fi
+
+          echo "Listing $HOME/.android:"
+          ls -la "$HOME/.android"
+          test -f "$HOME/.android/debug.keystore"
+          echo "✅ debug.keystore present."
+
       - name: 📥 Download ZIP & extract native project
         run: |
           set -e
           echo "➡️ Downloading native ZIP: $ZIP_URL"
           curl -L "$ZIP_URL" -o native.zip
+
           mkdir -p build
           unzip -q native.zip -d build
+
           echo "📂 Listing extracted content:"
           ls -R build
 
+      # ------------------------------
+      # MAIN BUILD STEP (runs inside build/)
+      # ------------------------------
       - name: 🏗 Build APK (Release → Debug fallback)
         working-directory: build
         run: |
@@ -65,7 +97,6 @@ jobs:
             gradle assembleRelease --warning-mode all || gradle assembleDebug --warning-mode all
           fi
 
-      # ✅ MINIMAL PATCH: prefer a NON-UNSIGNED apk if both exist
       - name: 🔍 Locate APK
         id: find_apk
         working-directory: build
@@ -73,10 +104,7 @@ jobs:
           set -e
           echo "Searching for APKs inside app/build/outputs..."
 
-          # Prefer signed release/debug APKs first (exclude *unsigned*)
           APK_PATH=$(find app/build/outputs/apk -type f -name "*.apk" | grep -vi "unsigned" | head -n 1 || true)
-
-          # Fallback: allow unsigned if that's all we have (should not happen after worker signing patch)
           if [ -z "$APK_PATH" ]; then
             APK_PATH=$(find app/build/outputs/apk -type f -name "*.apk" | head -n 1 || true)
           fi
@@ -108,10 +136,10 @@ jobs:
             --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
             --region auto
 
-          # IMPORTANT: return Worker-served URL in callback (works even if r2.dev breaks)
+          # Public URL should be served via your Worker route:
           APK_URL="https://novabridge-build-worker.novabridge.workers.dev/apk/${BUILD_ID}"
           echo "apk_url=$APK_URL" >> $GITHUB_OUTPUT
-          echo "✅ APK uploaded. Public download via Worker: $APK_URL"
+          echo "✅ APK uploaded. Public URL via Worker: $APK_URL"
 
       - name: ✅ Notify Worker – success
         if: success() && env.CALLBACK_URL != ''
