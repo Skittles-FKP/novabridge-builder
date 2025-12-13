@@ -1,10 +1,7 @@
 name: NovaBridge Android Cloud Build v16.9
 
 on:
-  # Allow manual run
   workflow_dispatch:
-
-  # Triggered by Worker repository_dispatch event
   repository_dispatch:
     types: [novabridge_android_build_v16_9]
 
@@ -19,6 +16,7 @@ jobs:
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       R2_BUCKET: ${{ secrets.R2_BUCKET }}
+      R2_SECRET_ACCESS_KEY_ID: ${{ secrets.R2_SECRET_ACCESS_KEY_ID }}
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
 
     steps:
@@ -47,16 +45,11 @@ jobs:
           set -e
           echo "➡️ Downloading native ZIP: $ZIP_URL"
           curl -L "$ZIP_URL" -o native.zip
-
           mkdir -p build
           unzip -q native.zip -d build
-
           echo "📂 Listing extracted content:"
           ls -R build
 
-      # ------------------------------
-      # MAIN BUILD STEP (runs inside build/)
-      # ------------------------------
       - name: 🏗 Build APK (Release → Debug fallback)
         working-directory: build
         run: |
@@ -72,9 +65,7 @@ jobs:
             gradle assembleRelease --warning-mode all || gradle assembleDebug --warning-mode all
           fi
 
-      # ------------------------------
-      # FIND THE PRODUCED APK
-      # ------------------------------
+      # ✅ MINIMAL PATCH: prefer a NON-UNSIGNED apk if both exist
       - name: 🔍 Locate APK
         id: find_apk
         working-directory: build
@@ -82,8 +73,13 @@ jobs:
           set -e
           echo "Searching for APKs inside app/build/outputs..."
 
-          APK_PATH=$(find app/build/outputs/apk -type f \
-            \( -name "*release*.apk" -o -name "*debug*.apk" \) | head -n 1 || true)
+          # Prefer signed release/debug APKs first (exclude *unsigned*)
+          APK_PATH=$(find app/build/outputs/apk -type f -name "*.apk" | grep -vi "unsigned" | head -n 1 || true)
+
+          # Fallback: allow unsigned if that's all we have (should not happen after worker signing patch)
+          if [ -z "$APK_PATH" ]; then
+            APK_PATH=$(find app/build/outputs/apk -type f -name "*.apk" | head -n 1 || true)
+          fi
 
           if [ -z "$APK_PATH" ]; then
             echo "❌ No APK found"
@@ -94,9 +90,6 @@ jobs:
           echo "✔ Found APK: $APK_PATH"
           echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
 
-      # ------------------------------
-      # UPLOAD TO CLOUDFLARE R2
-      # ------------------------------
       - name: ☁️ Upload APK to R2
         id: upload_r2
         run: |
@@ -115,24 +108,17 @@ jobs:
             --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
             --region auto
 
-          INTERNAL_R2_URL="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${R2_BUCKET}/${DEST_PATH}"
-          echo "ℹ️ Internal R2 URL (not public): $INTERNAL_R2_URL"
-
-          # ✅ Public-facing download URL via Worker proxy
+          # IMPORTANT: return Worker-served URL in callback (works even if r2.dev breaks)
           APK_URL="https://novabridge-build-worker.novabridge.workers.dev/apk/${BUILD_ID}"
-
           echo "apk_url=$APK_URL" >> $GITHUB_OUTPUT
-          echo "✅ APK will be downloadable at: $APK_URL"
+          echo "✅ APK uploaded. Public download via Worker: $APK_URL"
 
-      # ------------------------------
-      # SEND CALLBACK TO WORKER (SUCCESS)
-      # ------------------------------
       - name: ✅ Notify Worker – success
         if: success() && env.CALLBACK_URL != ''
         run: |
           set -e
           APK_URL="${{ steps.upload_r2.outputs.apk_url }}"
-          echo "🔔 Notifying Worker of SUCCESS. BUILD_ID=${BUILD_ID}"
+          echo "🔔 Notifying Worker of success. BUILD_ID=${BUILD_ID}"
           echo "🔗 APK_URL=${APK_URL}"
 
           curl -X POST "$CALLBACK_URL" \
@@ -144,9 +130,6 @@ jobs:
                 --arg msg "Android build completed successfully" \
                 '{build_id:$id, status:$status, artifact_url:$art, message:$msg}')"
 
-      # ------------------------------
-      # SEND CALLBACK TO WORKER (FAILURE)
-      # ------------------------------
       - name: ❌ Notify Worker – failure
         if: failure() && env.CALLBACK_URL != ''
         run: |
