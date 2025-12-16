@@ -15,50 +15,37 @@ jobs:
       CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
       CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
 
+      # R2 (REUSED from Android)
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_BUCKET: novabridge-builds
+
     steps:
-      # ------------------------------------------------------------
-      # 1. Checkout (standard)
-      # ------------------------------------------------------------
-      - name: 🧩 Checkout repo
+      - name: 🧩 Checkout
         uses: actions/checkout@v4
 
-      # ------------------------------------------------------------
-      # 2. Download iOS project ZIP from Worker
-      # ------------------------------------------------------------
       - name: 📦 Download iOS ZIP
         run: |
-          echo "Downloading ZIP from:"
-          echo "$ZIP_URL"
           curl -L "$ZIP_URL" -o ios.zip
-
-      - name: 📂 Unzip project
-        run: |
           unzip ios.zip -d ios
-          echo "Unzipped contents:"
-          ls -R ios
 
-      # ------------------------------------------------------------
-      # 3. Generate iOS AppIcon Asset Catalog
-      # ------------------------------------------------------------
       - name: 🎨 Generate App Icons
         run: |
           APP_DIR=$(find ios -type d -name App | head -n 1)
           ICONSET="$APP_DIR/Assets.xcassets/AppIcon.appiconset"
-          SOURCE="$ICONSET/AppIcon-1024.png"
+          SRC="$ICONSET/AppIcon-1024.png"
 
-          if [ ! -f "$SOURCE" ]; then
-            echo "❌ Missing AppIcon-1024.png"
+          if [ ! -f "$SRC" ]; then
+            echo "Missing AppIcon-1024.png"
             exit 1
           fi
-
-          echo "Using source icon: $SOURCE"
 
           gen () {
             SIZE=$1
             SCALE=$2
-            OUT="$ICONSET/icon-${SIZE}@${SCALE}x.png"
             PX=$(echo "$SIZE * $SCALE" | bc)
-            sips -z $PX $PX "$SOURCE" --out "$OUT"
+            sips -z $PX $PX "$SRC" --out "$ICONSET/icon-${SIZE}@${SCALE}x.png"
           }
 
           gen 20 2
@@ -73,7 +60,7 @@ jobs:
           gen 76 2
           gen 83.5 2
 
-          cp "$SOURCE" "$ICONSET/icon-1024.png"
+          cp "$SRC" "$ICONSET/icon-1024.png"
 
           cat > "$ICONSET/Contents.json" <<EOF
           {
@@ -86,24 +73,20 @@ jobs:
               { "idiom": "iphone", "size": "40x40", "filename": "icon-40@3x.png", "scale": "3x" },
               { "idiom": "iphone", "size": "60x60", "filename": "icon-60@2x.png", "scale": "2x" },
               { "idiom": "iphone", "size": "60x60", "filename": "icon-60@3x.png", "scale": "3x" },
-              { "idiom": "ipad",   "size": "76x76", "filename": "icon-76@1x.png", "scale": "1x" },
-              { "idiom": "ipad",   "size": "76x76", "filename": "icon-76@2x.png", "scale": "2x" },
-              { "idiom": "ipad",   "size": "83.5x83.5", "filename": "icon-83.5@2x.png", "scale": "2x" },
+              { "idiom": "ipad", "size": "76x76", "filename": "icon-76@1x.png", "scale": "1x" },
+              { "idiom": "ipad", "size": "76x76", "filename": "icon-76@2x.png", "scale": "2x" },
+              { "idiom": "ipad", "size": "83.5x83.5", "filename": "icon-83.5@2x.png", "scale": "2x" },
               { "idiom": "ios-marketing", "size": "1024x1024", "filename": "icon-1024.png", "scale": "1x" }
             ],
             "info": { "version": 1, "author": "xcode" }
           }
           EOF
 
-      # ------------------------------------------------------------
-      # 4. Build iOS app (unsigned, no Apple cert required)
-      # ------------------------------------------------------------
       - name: 🏗 Build iOS app (unsigned)
         run: |
           APP_DIR=$(find ios -type d -name App | head -n 1)
           cd "$APP_DIR"
 
-          echo "Running unsigned iOS build"
           xcodebuild \
             -scheme App \
             -sdk iphoneos \
@@ -112,27 +95,23 @@ jobs:
             build \
             CODE_SIGNING_ALLOWED=NO
 
-      # ------------------------------------------------------------
-      # 5. Package build output
-      # ------------------------------------------------------------
       - name: 📦 Package build output
         run: |
-          mkdir -p out
-          cp -R ios out/ios-build
-          zip -r ios-build-$BUILD_ID.zip out
+          zip -r ios-artifact-$BUILD_ID.zip ios
 
-      # ------------------------------------------------------------
-      # 6. Upload artifact to GitHub
-      # ------------------------------------------------------------
-      - name: ⬆️ Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ios-build-${{ env.BUILD_ID }}
-          path: ios-build-${{ env.BUILD_ID }}.zip
+      - name: ☁️ Upload artifact to Cloudflare R2
+        run: |
+          ARTIFACT_KEY="ios/artifacts/$BUILD_ID.zip"
 
-      # ------------------------------------------------------------
-      # 7. Callback SUCCESS
-      # ------------------------------------------------------------
+          aws configure set aws_access_key_id "$R2_ACCESS_KEY_ID"
+          aws configure set aws_secret_access_key "$R2_SECRET_ACCESS_KEY"
+          aws configure set default.region us-east-1
+
+          aws s3 cp \
+            ios-artifact-$BUILD_ID.zip \
+            s3://$R2_BUCKET/$ARTIFACT_KEY \
+            --endpoint-url=https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com
+
       - name: 📡 Callback success
         if: success()
         run: |
@@ -142,12 +121,9 @@ jobs:
             -d '{
               "build_id": "'"$BUILD_ID"'",
               "status": "success",
-              "artifact_url": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+              "artifact_key": "ios/artifacts/'"$BUILD_ID"'.zip"
             }'
 
-      # ------------------------------------------------------------
-      # 8. Callback FAILURE
-      # ------------------------------------------------------------
       - name: ❌ Callback failure
         if: failure()
         run: |
