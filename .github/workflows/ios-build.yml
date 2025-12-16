@@ -1,0 +1,160 @@
+name: NovaBridge iOS Build
+
+on:
+  repository_dispatch:
+    types: [novabridge_ios_build_v1]
+
+jobs:
+  ios-build:
+    runs-on: macos-latest
+    timeout-minutes: 45
+
+    env:
+      BUILD_ID: ${{ github.event.client_payload.build_id }}
+      ZIP_URL: ${{ github.event.client_payload.zip_url }}
+      CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
+      CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
+
+    steps:
+      # ------------------------------------------------------------
+      # 1. Checkout (standard)
+      # ------------------------------------------------------------
+      - name: 🧩 Checkout repo
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------
+      # 2. Download iOS project ZIP from Worker
+      # ------------------------------------------------------------
+      - name: 📦 Download iOS ZIP
+        run: |
+          echo "Downloading ZIP from:"
+          echo "$ZIP_URL"
+          curl -L "$ZIP_URL" -o ios.zip
+
+      - name: 📂 Unzip project
+        run: |
+          unzip ios.zip -d ios
+          echo "Unzipped contents:"
+          ls -R ios
+
+      # ------------------------------------------------------------
+      # 3. Generate iOS AppIcon Asset Catalog
+      # ------------------------------------------------------------
+      - name: 🎨 Generate App Icons
+        run: |
+          APP_DIR=$(find ios -type d -name App | head -n 1)
+          ICONSET="$APP_DIR/Assets.xcassets/AppIcon.appiconset"
+          SOURCE="$ICONSET/AppIcon-1024.png"
+
+          if [ ! -f "$SOURCE" ]; then
+            echo "❌ Missing AppIcon-1024.png"
+            exit 1
+          fi
+
+          echo "Using source icon: $SOURCE"
+
+          gen () {
+            SIZE=$1
+            SCALE=$2
+            OUT="$ICONSET/icon-${SIZE}@${SCALE}x.png"
+            PX=$(echo "$SIZE * $SCALE" | bc)
+            sips -z $PX $PX "$SOURCE" --out "$OUT"
+          }
+
+          gen 20 2
+          gen 20 3
+          gen 29 2
+          gen 29 3
+          gen 40 2
+          gen 40 3
+          gen 60 2
+          gen 60 3
+          gen 76 1
+          gen 76 2
+          gen 83.5 2
+
+          cp "$SOURCE" "$ICONSET/icon-1024.png"
+
+          cat > "$ICONSET/Contents.json" <<EOF
+          {
+            "images": [
+              { "idiom": "iphone", "size": "20x20", "filename": "icon-20@2x.png", "scale": "2x" },
+              { "idiom": "iphone", "size": "20x20", "filename": "icon-20@3x.png", "scale": "3x" },
+              { "idiom": "iphone", "size": "29x29", "filename": "icon-29@2x.png", "scale": "2x" },
+              { "idiom": "iphone", "size": "29x29", "filename": "icon-29@3x.png", "scale": "3x" },
+              { "idiom": "iphone", "size": "40x40", "filename": "icon-40@2x.png", "scale": "2x" },
+              { "idiom": "iphone", "size": "40x40", "filename": "icon-40@3x.png", "scale": "3x" },
+              { "idiom": "iphone", "size": "60x60", "filename": "icon-60@2x.png", "scale": "2x" },
+              { "idiom": "iphone", "size": "60x60", "filename": "icon-60@3x.png", "scale": "3x" },
+              { "idiom": "ipad",   "size": "76x76", "filename": "icon-76@1x.png", "scale": "1x" },
+              { "idiom": "ipad",   "size": "76x76", "filename": "icon-76@2x.png", "scale": "2x" },
+              { "idiom": "ipad",   "size": "83.5x83.5", "filename": "icon-83.5@2x.png", "scale": "2x" },
+              { "idiom": "ios-marketing", "size": "1024x1024", "filename": "icon-1024.png", "scale": "1x" }
+            ],
+            "info": { "version": 1, "author": "xcode" }
+          }
+          EOF
+
+      # ------------------------------------------------------------
+      # 4. Build iOS app (unsigned, no Apple cert required)
+      # ------------------------------------------------------------
+      - name: 🏗 Build iOS app (unsigned)
+        run: |
+          APP_DIR=$(find ios -type d -name App | head -n 1)
+          cd "$APP_DIR"
+
+          echo "Running unsigned iOS build"
+          xcodebuild \
+            -scheme App \
+            -sdk iphoneos \
+            -configuration Release \
+            -destination generic/platform=iOS \
+            build \
+            CODE_SIGNING_ALLOWED=NO
+
+      # ------------------------------------------------------------
+      # 5. Package build output
+      # ------------------------------------------------------------
+      - name: 📦 Package build output
+        run: |
+          mkdir -p out
+          cp -R ios out/ios-build
+          zip -r ios-build-$BUILD_ID.zip out
+
+      # ------------------------------------------------------------
+      # 6. Upload artifact to GitHub
+      # ------------------------------------------------------------
+      - name: ⬆️ Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-${{ env.BUILD_ID }}
+          path: ios-build-${{ env.BUILD_ID }}.zip
+
+      # ------------------------------------------------------------
+      # 7. Callback SUCCESS
+      # ------------------------------------------------------------
+      - name: 📡 Callback success
+        if: success()
+        run: |
+          curl -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-novabridge-token: $CALLBACK_TOKEN" \
+            -d '{
+              "build_id": "'"$BUILD_ID"'",
+              "status": "success",
+              "artifact_url": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            }'
+
+      # ------------------------------------------------------------
+      # 8. Callback FAILURE
+      # ------------------------------------------------------------
+      - name: ❌ Callback failure
+        if: failure()
+        run: |
+          curl -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-novabridge-token: $CALLBACK_TOKEN" \
+            -d '{
+              "build_id": "'"$BUILD_ID"'",
+              "status": "failed"
+            }'
