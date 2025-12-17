@@ -10,85 +10,41 @@ jobs:
     timeout-minutes: 45
 
     env:
-      BUILD_ID: ${{ github.event.client_payload.build_id }}
-      ZIP_URL: ${{ github.event.client_payload.zip_url }}
-      CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
-      CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
+      BUILD_ID: ${{ github.event.client_payload.buildId }}
+      ZIP_URL: ${{ github.event.client_payload.zipUrl }}
+      CALLBACK_URL: ${{ github.event.client_payload.callbackUrl }}
 
-      # R2 (REUSED from Android)
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
       R2_BUCKET: novabridge-builds
+      CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
 
     steps:
-      - name: 🧩 Checkout
-        uses: actions/checkout@v4
-
       - name: 📦 Download iOS ZIP
         run: |
           curl -L "$ZIP_URL" -o ios.zip
           unzip ios.zip -d ios
 
-      - name: 🎨 Generate App Icons
+      - name: 🔧 Install XcodeGen
         run: |
-          APP_DIR=$(find ios -type d -name App | head -n 1)
-          ICONSET="$APP_DIR/Assets.xcassets/AppIcon.appiconset"
-          SRC="$ICONSET/AppIcon-1024.png"
+          brew install xcodegen
 
-          if [ ! -f "$SRC" ]; then
-            echo "Missing AppIcon-1024.png"
-            exit 1
-          fi
-
-          gen () {
-            SIZE=$1
-            SCALE=$2
-            PX=$(echo "$SIZE * $SCALE" | bc)
-            sips -z $PX $PX "$SRC" --out "$ICONSET/icon-${SIZE}@${SCALE}x.png"
-          }
-
-          gen 20 2
-          gen 20 3
-          gen 29 2
-          gen 29 3
-          gen 40 2
-          gen 40 3
-          gen 60 2
-          gen 60 3
-          gen 76 1
-          gen 76 2
-          gen 83.5 2
-
-          cp "$SRC" "$ICONSET/icon-1024.png"
-
-          cat > "$ICONSET/Contents.json" <<EOF
-          {
-            "images": [
-              { "idiom": "iphone", "size": "20x20", "filename": "icon-20@2x.png", "scale": "2x" },
-              { "idiom": "iphone", "size": "20x20", "filename": "icon-20@3x.png", "scale": "3x" },
-              { "idiom": "iphone", "size": "29x29", "filename": "icon-29@2x.png", "scale": "2x" },
-              { "idiom": "iphone", "size": "29x29", "filename": "icon-29@3x.png", "scale": "3x" },
-              { "idiom": "iphone", "size": "40x40", "filename": "icon-40@2x.png", "scale": "2x" },
-              { "idiom": "iphone", "size": "40x40", "filename": "icon-40@3x.png", "scale": "3x" },
-              { "idiom": "iphone", "size": "60x60", "filename": "icon-60@2x.png", "scale": "2x" },
-              { "idiom": "iphone", "size": "60x60", "filename": "icon-60@3x.png", "scale": "3x" },
-              { "idiom": "ipad", "size": "76x76", "filename": "icon-76@1x.png", "scale": "1x" },
-              { "idiom": "ipad", "size": "76x76", "filename": "icon-76@2x.png", "scale": "2x" },
-              { "idiom": "ipad", "size": "83.5x83.5", "filename": "icon-83.5@2x.png", "scale": "2x" },
-              { "idiom": "ios-marketing", "size": "1024x1024", "filename": "icon-1024.png", "scale": "1x" }
-            ],
-            "info": { "version": 1, "author": "xcode" }
-          }
-          EOF
+      - name: 🏗 Generate Xcode project
+        run: |
+          IOS_DIR=$(find ios -name project.yml | head -n 1 | xargs dirname)
+          cd "$IOS_DIR"
+          xcodegen generate
 
       - name: 🏗 Build iOS app (unsigned)
         run: |
-          APP_DIR=$(find ios -type d -name App | head -n 1)
-          cd "$APP_DIR"
-
+          IOS_DIR=$(find ios -name "*.xcodeproj" | head -n 1 | xargs dirname)
+          PROJECT=$(find "$IOS_DIR" -name "*.xcodeproj" | head -n 1 | xargs basename)
+          SCHEME="${PROJECT%.xcodeproj}"
+          cd "$IOS_DIR"
           xcodebuild \
-            -scheme App \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
             -sdk iphoneos \
             -configuration Release \
             -destination generic/platform=iOS \
@@ -99,17 +55,13 @@ jobs:
         run: |
           zip -r ios-artifact-$BUILD_ID.zip ios
 
-      - name: ☁️ Upload artifact to Cloudflare R2
+      - name: ☁️ Upload artifact to R2
         run: |
-          ARTIFACT_KEY="ios/artifacts/$BUILD_ID.zip"
-
           aws configure set aws_access_key_id "$R2_ACCESS_KEY_ID"
           aws configure set aws_secret_access_key "$R2_SECRET_ACCESS_KEY"
           aws configure set default.region us-east-1
-
-          aws s3 cp \
-            ios-artifact-$BUILD_ID.zip \
-            s3://$R2_BUCKET/$ARTIFACT_KEY \
+          aws s3 cp ios-artifact-$BUILD_ID.zip \
+            s3://$R2_BUCKET/ios/artifacts/$BUILD_ID.zip \
             --endpoint-url=https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com
 
       - name: 📡 Callback success
@@ -118,11 +70,7 @@ jobs:
           curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d '{
-              "build_id": "'"$BUILD_ID"'",
-              "status": "success",
-              "artifact_key": "ios/artifacts/'"$BUILD_ID"'.zip"
-            }'
+            -d "{\"build_id\":\"$BUILD_ID\",\"status\":\"success\",\"artifact_key\":\"ios/artifacts/$BUILD_ID.zip\"}"
 
       - name: ❌ Callback failure
         if: failure()
@@ -130,7 +78,4 @@ jobs:
           curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d '{
-              "build_id": "'"$BUILD_ID"'",
-              "status": "failed"
-            }'
+            -d "{\"build_id\":\"$BUILD_ID\",\"status\":\"failed\"}"
