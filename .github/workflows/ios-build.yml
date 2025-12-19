@@ -1,4 +1,4 @@
-name: NovaBridge iOS Build v1.1.5
+name: NovaBridge iOS Build v1.1.6
 
 on:
   repository_dispatch:
@@ -15,9 +15,6 @@ jobs:
       CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
 
     steps:
-      # --------------------------------------------------
-      # 1️⃣ Validate inputs
-      # --------------------------------------------------
       - name: Validate inputs
         shell: bash
         run: |
@@ -37,9 +34,6 @@ jobs:
             exit 1
           fi
 
-      # --------------------------------------------------
-      # 2️⃣ Callback — Downloading Project
-      # --------------------------------------------------
       - name: Callback — Downloading Project
         shell: bash
         run: |
@@ -51,12 +45,8 @@ jobs:
               -H "x-novabridge-token: $CALLBACK_TOKEN" \
               -d "$payload" || true
           }
-
           callback "{\"build_id\":\"$BUILD_ID\",\"step\":3,\"step_state\":\"active\",\"log\":\"iOS: 📥 Downloading iOS project files\"}" >/dev/null
 
-      # --------------------------------------------------
-      # 3️⃣ Download ZIP
-      # --------------------------------------------------
       - name: Download iOS ZIP
         shell: bash
         run: |
@@ -69,9 +59,6 @@ jobs:
           echo "📂 Workspace tree (maxdepth 5):"
           find . -maxdepth 5
 
-      # --------------------------------------------------
-      # 4️⃣ Install XcodeGen
-      # --------------------------------------------------
       - name: Install XcodeGen
         shell: bash
         run: |
@@ -81,9 +68,6 @@ jobs:
           fi
           xcodegen --version
 
-      # --------------------------------------------------
-      # 5️⃣ Generate Xcode Project
-      # --------------------------------------------------
       - name: Generate Xcode Project
         shell: bash
         run: |
@@ -111,9 +95,7 @@ jobs:
           }
           callback "{\"build_id\":\"$BUILD_ID\",\"step\":4,\"step_state\":\"active\",\"log\":\"iOS: 🧱 Xcode project generated\"}" >/dev/null
 
-      # --------------------------------------------------
-      # 6️⃣ Fix AppIcon set (1024 + required sizes)
-      # --------------------------------------------------
+      # ✅ PATCHED HERE (no cp identical failure)
       - name: Fix AppIcon set (1024 + required sizes)
         shell: bash
         run: |
@@ -123,6 +105,7 @@ jobs:
           ICONSET_DIR="App/Assets.xcassets/AppIcon.appiconset"
           mkdir -p "$ICONSET_DIR"
 
+          # Choose a source image
           SRC=""
           if [ -f "$ICONSET_DIR/AppIcon-1024.png" ]; then
             SRC="$ICONSET_DIR/AppIcon-1024.png"
@@ -138,13 +121,18 @@ jobs:
           fi
 
           echo "🎨 Using source icon: $SRC"
-          cp "$SRC" "$ICONSET_DIR/AppIcon-1024.png"
-          sips -z 1024 1024 "$ICONSET_DIR/AppIcon-1024.png" >/dev/null
+
+          # Ensure target 1024 exists and is 1024x1024
+          TARGET="$ICONSET_DIR/AppIcon-1024.png"
+          if [ "$SRC" != "$TARGET" ]; then
+            cp "$SRC" "$TARGET"
+          fi
+          sips -z 1024 1024 "$TARGET" >/dev/null
 
           gen() {
             local px="$1"
             local out="$2"
-            cp "$ICONSET_DIR/AppIcon-1024.png" "$ICONSET_DIR/$out"
+            cp "$TARGET" "$ICONSET_DIR/$out"
             sips -z "$px" "$px" "$ICONSET_DIR/$out" >/dev/null
           }
 
@@ -197,9 +185,6 @@ jobs:
           }
           JSON
 
-      # --------------------------------------------------
-      # 7️⃣ Detect project + scheme
-      # --------------------------------------------------
       - name: Detect project + scheme
         shell: bash
         run: |
@@ -225,9 +210,6 @@ jobs:
           echo "PROJECT_PATH=$PROJECT_PATH" >> $GITHUB_ENV
           echo "SCHEME=$SCHEME" >> $GITHUB_ENV
 
-      # --------------------------------------------------
-      # 8️⃣ Callback — Queued
-      # --------------------------------------------------
       - name: Callback — Queued on macOS runner
         shell: bash
         run: |
@@ -241,9 +223,6 @@ jobs:
           }
           callback "{\"build_id\":\"$BUILD_ID\",\"step\":5,\"step_state\":\"active\",\"log\":\"iOS: 📱 Queued on macOS runner\"}" >/dev/null
 
-      # --------------------------------------------------
-      # 9️⃣ Build with Xcode
-      # --------------------------------------------------
       - name: Build with Xcode
         shell: bash
         run: |
@@ -268,9 +247,6 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             build
 
-      # --------------------------------------------------
-      # 🔟 Package .app
-      # --------------------------------------------------
       - name: Package iOS Build
         shell: bash
         run: |
@@ -294,18 +270,12 @@ jobs:
 
           zip -r ios-build.zip "$APP_PATH"
 
-      # --------------------------------------------------
-      # 1️⃣1️⃣ Upload artifact to GitHub
-      # --------------------------------------------------
       - name: Upload iOS Artifact
         uses: actions/upload-artifact@v4
         with:
           name: ios-build-${{ env.BUILD_ID }}
           path: ios-build.zip
 
-      # --------------------------------------------------
-      # ✅ Final success callback
-      # --------------------------------------------------
       - name: Callback — Build Complete
         shell: bash
         run: |
@@ -319,9 +289,6 @@ jobs:
           }
           callback "{\"build_id\":\"$BUILD_ID\",\"status\":\"success\",\"step\":8,\"step_state\":\"done\",\"log\":\"iOS: ✅ Build completed successfully\",\"artifact_key\":\"ios/artifacts/$BUILD_ID.zip\"}" >/dev/null
 
-      # --------------------------------------------------
-      # ❌ Failure callback
-      # --------------------------------------------------
       - name: Failure callback
         if: failure()
         shell: bash
