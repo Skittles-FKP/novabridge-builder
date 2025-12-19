@@ -1,4 +1,4 @@
-name: NovaBridge iOS Build v1.1.4
+name: NovaBridge iOS Build v1.1.5
 
 on:
   repository_dispatch:
@@ -38,13 +38,12 @@ jobs:
           fi
 
       # --------------------------------------------------
-      # Helper: callback (silent; never fails job)
+      # 2️⃣ Callback — Downloading Project
       # --------------------------------------------------
-      - name: Callback helper ready
+      - name: Callback — Downloading Project
         shell: bash
         run: |
-          cat > cb() <<'EOF'
-          cb() {
+          callback() {
             local payload="$1"
             curl -sS -o /dev/null -w "%{http_code}" \
               -X POST "$CALLBACK_URL" \
@@ -52,16 +51,8 @@ jobs:
               -H "x-novabridge-token: $CALLBACK_TOKEN" \
               -d "$payload" || true
           }
-          EOF
 
-      # --------------------------------------------------
-      # 2️⃣ Callback — Downloading Project
-      # --------------------------------------------------
-      - name: Callback — Downloading Project
-        shell: bash
-        run: |
-          source cb
-          cb "{\"build_id\":\"$BUILD_ID\",\"step\":3,\"step_state\":\"active\",\"log\":\"iOS: 📥 Downloading iOS project files\"}"
+          callback "{\"build_id\":\"$BUILD_ID\",\"step\":3,\"step_state\":\"active\",\"log\":\"iOS: 📥 Downloading iOS project files\"}" >/dev/null
 
       # --------------------------------------------------
       # 3️⃣ Download ZIP
@@ -110,8 +101,18 @@ jobs:
 
           echo "IOS_DIR=$IOS_DIR" >> $GITHUB_ENV
 
+          callback() {
+            local payload="$1"
+            curl -sS -o /dev/null -w "%{http_code}" \
+              -X POST "$CALLBACK_URL" \
+              -H "Content-Type: application/json" \
+              -H "x-novabridge-token: $CALLBACK_TOKEN" \
+              -d "$payload" || true
+          }
+          callback "{\"build_id\":\"$BUILD_ID\",\"step\":4,\"step_state\":\"active\",\"log\":\"iOS: 🧱 Xcode project generated\"}" >/dev/null
+
       # --------------------------------------------------
-      # 6️⃣ Repair / Create AppIcon.appiconset (CRITICAL FIX)
+      # 6️⃣ Fix AppIcon set (1024 + required sizes)
       # --------------------------------------------------
       - name: Fix AppIcon set (1024 + required sizes)
         shell: bash
@@ -122,7 +123,6 @@ jobs:
           ICONSET_DIR="App/Assets.xcassets/AppIcon.appiconset"
           mkdir -p "$ICONSET_DIR"
 
-          # Pick a source image: prefer AppIcon-1024.png, else any PNG in iconset, else fail.
           SRC=""
           if [ -f "$ICONSET_DIR/AppIcon-1024.png" ]; then
             SRC="$ICONSET_DIR/AppIcon-1024.png"
@@ -132,17 +132,15 @@ jobs:
 
           if [ -z "$SRC" ]; then
             echo "❌ No source icon PNG found in $ICONSET_DIR"
-            echo "✅ Ensure your Worker includes at least one PNG in AppIcon.appiconset"
+            echo "✅ Ensure Worker includes at least one PNG in AppIcon.appiconset"
             find "App/Assets.xcassets" -maxdepth 3
             exit 1
           fi
 
           echo "🎨 Using source icon: $SRC"
-          # Ensure 1024 exists and is correct
           cp "$SRC" "$ICONSET_DIR/AppIcon-1024.png"
           sips -z 1024 1024 "$ICONSET_DIR/AppIcon-1024.png" >/dev/null
 
-          # Generate required sizes (using sips)
           gen() {
             local px="$1"
             local out="$2"
@@ -171,7 +169,6 @@ jobs:
           gen 152 "AppIcon-76@2x.png"
           gen 167 "AppIcon-83.5@2x.png"
 
-          # Build Contents.json (valid + Apple-compliant)
           cat > "$ICONSET_DIR/Contents.json" <<'JSON'
           {
             "images": [
@@ -199,9 +196,6 @@ jobs:
             "info": { "version": 1, "author": "xcode" }
           }
           JSON
-
-          echo "✅ AppIcon repaired. Listing:"
-          ls -la "$ICONSET_DIR"
 
       # --------------------------------------------------
       # 7️⃣ Detect project + scheme
@@ -237,8 +231,15 @@ jobs:
       - name: Callback — Queued on macOS runner
         shell: bash
         run: |
-          source cb
-          cb "{\"build_id\":\"$BUILD_ID\",\"step\":5,\"step_state\":\"active\",\"log\":\"iOS: 📱 Queued on macOS runner\"}"
+          callback() {
+            local payload="$1"
+            curl -sS -o /dev/null -w "%{http_code}" \
+              -X POST "$CALLBACK_URL" \
+              -H "Content-Type: application/json" \
+              -H "x-novabridge-token: $CALLBACK_TOKEN" \
+              -d "$payload" || true
+          }
+          callback "{\"build_id\":\"$BUILD_ID\",\"step\":5,\"step_state\":\"active\",\"log\":\"iOS: 📱 Queued on macOS runner\"}" >/dev/null
 
       # --------------------------------------------------
       # 9️⃣ Build with Xcode
@@ -248,8 +249,16 @@ jobs:
         run: |
           set -e
           cd "$IOS_DIR"
-          source cb
-          cb "{\"build_id\":\"$BUILD_ID\",\"step\":6,\"step_state\":\"active\",\"log\":\"iOS: 🔨 Building with Xcode\"}"
+
+          callback() {
+            local payload="$1"
+            curl -sS -o /dev/null -w "%{http_code}" \
+              -X POST "$CALLBACK_URL" \
+              -H "Content-Type: application/json" \
+              -H "x-novabridge-token: $CALLBACK_TOKEN" \
+              -d "$payload" || true
+          }
+          callback "{\"build_id\":\"$BUILD_ID\",\"step\":6,\"step_state\":\"active\",\"log\":\"iOS: 🔨 Building with Xcode\"}" >/dev/null
 
           xcodebuild \
             -project "$PROJECT_PATH" \
@@ -266,8 +275,16 @@ jobs:
         shell: bash
         run: |
           set -e
-          source cb
-          cb "{\"build_id\":\"$BUILD_ID\",\"step\":7,\"step_state\":\"active\",\"log\":\"iOS: 📦 Packaging iOS build\"}"
+
+          callback() {
+            local payload="$1"
+            curl -sS -o /dev/null -w "%{http_code}" \
+              -X POST "$CALLBACK_URL" \
+              -H "Content-Type: application/json" \
+              -H "x-novabridge-token: $CALLBACK_TOKEN" \
+              -d "$payload" || true
+          }
+          callback "{\"build_id\":\"$BUILD_ID\",\"step\":7,\"step_state\":\"active\",\"log\":\"iOS: 📦 Packaging iOS build\"}" >/dev/null
 
           APP_PATH="$(find ~/Library/Developer/Xcode/DerivedData -name "*.app" | head -n 1)"
           if [ -z "$APP_PATH" ]; then
@@ -287,20 +304,34 @@ jobs:
           path: ios-build.zip
 
       # --------------------------------------------------
-      # ✅ Final success callback (stops UI polling)
+      # ✅ Final success callback
       # --------------------------------------------------
       - name: Callback — Build Complete
         shell: bash
         run: |
-          source cb
-          cb "{\"build_id\":\"$BUILD_ID\",\"status\":\"success\",\"step\":8,\"step_state\":\"done\",\"log\":\"iOS: ✅ Build completed successfully\",\"artifact_key\":\"ios/artifacts/$BUILD_ID.zip\"}"
+          callback() {
+            local payload="$1"
+            curl -sS -o /dev/null -w "%{http_code}" \
+              -X POST "$CALLBACK_URL" \
+              -H "Content-Type: application/json" \
+              -H "x-novabridge-token: $CALLBACK_TOKEN" \
+              -d "$payload" || true
+          }
+          callback "{\"build_id\":\"$BUILD_ID\",\"status\":\"success\",\"step\":8,\"step_state\":\"done\",\"log\":\"iOS: ✅ Build completed successfully\",\"artifact_key\":\"ios/artifacts/$BUILD_ID.zip\"}" >/dev/null
 
       # --------------------------------------------------
-      # ❌ Failure callback (stops UI polling)
+      # ❌ Failure callback
       # --------------------------------------------------
       - name: Failure callback
         if: failure()
         shell: bash
         run: |
-          source cb || true
-          cb "{\"build_id\":\"$BUILD_ID\",\"status\":\"failed\",\"step\":8,\"step_state\":\"failed\",\"log\":\"iOS: ❌ Build failed in GitHub Actions\"}" || true
+          callback() {
+            local payload="$1"
+            curl -sS -o /dev/null -w "%{http_code}" \
+              -X POST "$CALLBACK_URL" \
+              -H "Content-Type: application/json" \
+              -H "x-novabridge-token: $CALLBACK_TOKEN" \
+              -d "$payload" || true
+          }
+          callback "{\"build_id\":\"$BUILD_ID\",\"status\":\"failed\",\"step\":8,\"step_state\":\"failed\",\"log\":\"iOS: ❌ Build failed in GitHub Actions\"}" >/dev/null
