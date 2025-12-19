@@ -1,201 +1,124 @@
-name: NovaBridge iOS Build v1.1
+name: NovaBridge iOS Build
 
 on:
   repository_dispatch:
-    types:
-      - novabridge_ios_build_v1
+    types: [novabridge_ios_build_v1]
 
 jobs:
   ios-build:
     runs-on: macos-latest
-    timeout-minutes: 60
 
     env:
       BUILD_ID: ${{ github.event.client_payload.build_id }}
       ZIP_URL: ${{ github.event.client_payload.zip_url }}
       CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
-
       CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
 
-      # R2
-      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-      R2_BUCKET: novabridge-builds
-
-      # Optional TestFlight/App Store (Fastlane)
-      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
-      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
-      ASC_KEY_P8_BASE64: ${{ secrets.ASC_KEY_P8_BASE64 }}
-
-      # Optional code signing (if you decide to export IPA later)
-      # IOS_DIST_P12_BASE64: ${{ secrets.IOS_DIST_P12_BASE64 }}
-      # IOS_DIST_P12_PASSWORD: ${{ secrets.IOS_DIST_P12_PASSWORD }}
-      # IOS_PROVISION_PROFILE_BASE64: ${{ secrets.IOS_PROVISION_PROFILE_BASE64 }}
-
     steps:
-      - name: 🧪 Print incoming dispatch payload
-        run: |
-          echo '${{ toJson(github.event.client_payload) }}'
-          echo "BUILD_ID=$BUILD_ID"
-          echo "ZIP_URL=$ZIP_URL"
-          echo "CALLBACK_URL=$CALLBACK_URL"
-
-      - name: ✅ Validate inputs
+      # ----------------------------
+      # 0️⃣ Sanity check
+      # ----------------------------
+      - name: 🔍 Validate payload
         run: |
           if [ -z "$BUILD_ID" ]; then echo "❌ BUILD_ID missing"; exit 1; fi
           if [ -z "$ZIP_URL" ]; then echo "❌ ZIP_URL missing"; exit 1; fi
           if [ -z "$CALLBACK_URL" ]; then echo "❌ CALLBACK_URL missing"; exit 1; fi
           if [ -z "$CALLBACK_TOKEN" ]; then echo "❌ CALLBACK_TOKEN missing"; exit 1; fi
 
-      - name: 📡 Callback helper (bash functions)
-        shell: bash
+      # ----------------------------
+      # 1️⃣ Notify: Downloading Project
+      # ----------------------------
+      - name: 📥 Notify Worker (Downloading Project)
         run: |
-          cat << 'EOF' > cb.sh
-          cb() {
-            step="$1"
-            step_state="$2"
-            msg="$3"
-            status="$4" # optional: success|failed
-            extra="$5"  # optional: JSON fragment
-            payload="{\"build_id\":\"$BUILD_ID\",\"step\":$step,\"step_state\":\"$step_state\",\"log\":\"$msg\""
-            if [ -n "$status" ]; then payload="$payload, \"status\":\"$status\""; fi
-            if [ -n "$extra" ]; then payload="$payload, $extra"; fi
-            payload="$payload}"
-            echo "➡ cb payload: $payload"
-            curl -i -sS -X POST "$CALLBACK_URL" \
-              -H "Content-Type: application/json" \
-              -H "x-novabridge-token: $CALLBACK_TOKEN" \
-              -d "$payload" | head -n 20
-          }
-          EOF
+          curl -s -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-novabridge-token: $CALLBACK_TOKEN" \
+            -d "{\"build_id\":\"$BUILD_ID\",\"step\":3,\"step_state\":\"active\",\"log\":\"iOS: 📥 Downloading iOS project files\"}"
 
-      # -------------------- Step 3 --------------------
-      - name: 📥 Download iOS project ZIP (Step 3)
-        shell: bash
+      # ----------------------------
+      # 2️⃣ Download ZIP
+      # ----------------------------
+      - name: 📦 Download iOS project ZIP
         run: |
-          source cb.sh
-          cb 3 active "iOS: 📥 Downloading iOS project files" ""
           curl -L "$ZIP_URL" -o ios.zip
-          unzip ios.zip -d ios
-          cb 3 done "iOS: ✅ Downloaded iOS project files" ""
+          unzip ios.zip
 
-      # -------------------- Step 4 --------------------
-      - name: 🔧 Install XcodeGen (part of Step 4)
+      # ----------------------------
+      # 3️⃣ Generate Xcode Project
+      # ----------------------------
+      - name: 🧩 Generate Xcode project
         run: |
-          brew update
+          cd ios/NovaBridgeDemo-iOS
           brew install xcodegen
-
-      - name: 🧩 Generate Xcode project (Step 4)
-        shell: bash
-        run: |
-          source cb.sh
-          cb 4 active "iOS: 🧩 Generating Xcode project" ""
-          IOS_DIR=$(find ios -name project.yml | head -n 1 | xargs dirname)
-          if [ -z "$IOS_DIR" ]; then
-            cb 4 failed "iOS: ❌ project.yml not found" "failed" "\"error\":\"project.yml not found\""
-            exit 1
-          fi
-          cd "$IOS_DIR"
           xcodegen generate
-          cb 4 done "iOS: ✅ Xcode project generated" ""
 
-      # -------------------- Step 5 --------------------
-      - name: 📱 Queued on macOS runner (Step 5)
-        shell: bash
+          curl -s -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-novabridge-token: $CALLBACK_TOKEN" \
+            -d "{\"build_id\":\"$BUILD_ID\",\"step\":4,\"step_state\":\"done\",\"log\":\"iOS: 🧩 Xcode project generated\"}"
+
+      # ----------------------------
+      # 4️⃣ Queue macOS Runner
+      # ----------------------------
+      - name: 📱 Notify Queue
         run: |
-          source cb.sh
-          cb 5 done "iOS: 📱 Queued on macOS runner" ""
+          curl -s -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-novabridge-token: $CALLBACK_TOKEN" \
+            -d "{\"build_id\":\"$BUILD_ID\",\"step\":5,\"step_state\":\"active\",\"log\":\"iOS: 📱 Queued on macOS runner\"}"
 
-      # -------------------- Step 6 --------------------
-      - name: 🔨 Build with Xcode (Step 6)
-        shell: bash
+      # ----------------------------
+      # 5️⃣ Build with Xcode
+      # ----------------------------
+      - name: 🔨 Build with Xcode
         run: |
-          source cb.sh
-          cb 6 active "iOS: 🔨 Building iOS app with Xcode" ""
+          cd ios/NovaBridgeDemo-iOS
+          PROJECT=$(ls *.xcodeproj | head -n 1)
+          SCHEME=$(xcodebuild -list -project "$PROJECT" | grep "Schemes:" -A 5 | tail -n 1 | xargs)
 
-          IOS_DIR=$(find ios -name "*.xcodeproj" | head -n 1 | xargs dirname)
-          PROJECT=$(find "$IOS_DIR" -name "*.xcodeproj" | head -n 1 | xargs basename)
-          SCHEME="${PROJECT%.xcodeproj}"
+          curl -s -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-novabridge-token: $CALLBACK_TOKEN" \
+            -d "{\"build_id\":\"$BUILD_ID\",\"step\":6,\"step_state\":\"active\",\"log\":\"iOS: 🔨 Building with Xcode\"}"
 
-          cd "$IOS_DIR"
-
-          set -o pipefail
           xcodebuild \
             -project "$PROJECT" \
             -scheme "$SCHEME" \
             -configuration Release \
             -destination generic/platform=iOS \
             CODE_SIGNING_ALLOWED=NO \
-            build \
-            | tee xcodebuild.log
+            build
 
-          cb 6 done "iOS: ✅ Xcode build complete" ""
-
-      # -------------------- Step 7 --------------------
-      - name: 📦 Package iOS build artifact (Step 7)
-        if: success()
-        shell: bash
+      # ----------------------------
+      # 6️⃣ Package build artifact
+      # ----------------------------
+      - name: 📦 Package iOS build
         run: |
-          source cb.sh
-          cb 7 active "iOS: 📦 Packaging iOS build artifacts" ""
-          zip -r ios-artifact-$BUILD_ID.zip ios
-          cb 7 done "iOS: ✅ Packaged iOS artifacts" ""
+          APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -name "*.app" | head -n 1)
+          mkdir -p artifact
+          ditto "$APP_PATH" artifact/App.app
+          zip -r ios-build.zip artifact
 
-      # -------------------- Upload to R2 --------------------
-      - name: ☁️ Upload artifact to R2
-        if: success()
+          curl -s -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-novabridge-token: $CALLBACK_TOKEN" \
+            -d "{\"build_id\":\"$BUILD_ID\",\"step\":7,\"step_state\":\"done\",\"log\":\"iOS: 📦 Packaging iOS Build\"}"
+
+      # ----------------------------
+      # 7️⃣ Upload artifact to Worker
+      # ----------------------------
+      - name: ☁️ Upload artifact to Worker
         run: |
-          aws configure set aws_access_key_id "$R2_ACCESS_KEY_ID"
-          aws configure set aws_secret_access_key "$R2_SECRET_ACCESS_KEY"
-          aws configure set default.region us-east-1
+          curl -X PUT "$CALLBACK_URL/../artifact-ios/$BUILD_ID" \
+            -H "Content-Type: application/zip" \
+            --data-binary @ios-build.zip
 
-          aws s3 cp \
-            ios-artifact-$BUILD_ID.zip \
-            s3://$R2_BUCKET/ios/artifacts/$BUILD_ID.zip \
-            --endpoint-url=https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com
-
-      # -------------------- Step 8 (Complete) + callback success --------------------
-      - name: ✅ Callback success (Step 8)
-        if: success()
-        shell: bash
+      # ----------------------------
+      # 8️⃣ Final success callback
+      # ----------------------------
+      - name: ✅ Notify success
         run: |
-          source cb.sh
-          cb 8 done "iOS: ✅ Complete" "success" "\"artifact_key\":\"ios/artifacts/$BUILD_ID.zip\""
-
-      - name: ❌ Callback failure
-        if: failure()
-        shell: bash
-        run: |
-          source cb.sh
-          cb 6 failed "iOS: ❌ Build failed" "failed" "\"error\":\"xcodebuild failed\""
-
-      # -------------------- Step 9: TestFlight (optional hook) --------------------
-      # NOTE: To truly upload to TestFlight you typically need a signed IPA.
-      # This hook is provided; enable once signing/export is configured.
-      - name: 📱 TestFlight upload (Step 9) — optional
-        if: success() && env.ASC_KEY_ID != '' && env.ASC_ISSUER_ID != '' && env.ASC_KEY_P8_BASE64 != ''
-        shell: bash
-        run: |
-          source cb.sh
-          cb 9 active "iOS: 📱 Preparing TestFlight upload (requires IPA signing/export)" ""
-          # Placeholder: enable once you add archive+export IPA + fastlane pilot.
-          cb 9 done "iOS: ✅ TestFlight step configured (enable IPA export + pilot)" "" "\"testflight\":{\"enabled\":true,\"note\":\"Enable IPA export + fastlane pilot\"}"
-
-      # -------------------- Step 10: App Store submission (optional hook) --------------------
-      - name: 🏬 App Store submission (Step 10) — optional
-        if: success() && env.ASC_KEY_ID != '' && env.ASC_ISSUER_ID != '' && env.ASC_KEY_P8_BASE64 != ''
-        shell: bash
-        run: |
-          source cb.sh
-          cb 10 active "iOS: 🏬 App Store submission configured (requires metadata/screenshots + signed IPA)" ""
-          cb 10 done "iOS: ✅ App Store step configured" "" "\"appstore\":{\"enabled\":true,\"note\":\"Add fastlane deliver + metadata\"}"
-
-      # -------------------- Upload xcodebuild.log always --------------------
-      - name: 📎 Upload xcodebuild.log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: xcodebuild-log-${{ env.BUILD_ID }}
-          path: |
-            **/xcodebuild.log
+          curl -s -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-novabridge-token: $CALLBACK_TOKEN" \
+            -d "{\"build_id\":\"$BUILD_ID\",\"status\":\"success\",\"log\":\"iOS: ✅ Build completed successfully\"}"
