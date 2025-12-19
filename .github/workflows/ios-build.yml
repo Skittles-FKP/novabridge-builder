@@ -1,4 +1,4 @@
-name: NovaBridge iOS Build v1.1.0
+name: NovaBridge iOS Build v1.1.1
 
 on:
   repository_dispatch:
@@ -21,6 +21,10 @@ jobs:
       - name: Validate inputs
         run: |
           set -e
+          echo "➡ BUILD_ID=$BUILD_ID"
+          echo "➡ ZIP_URL=$ZIP_URL"
+          echo "➡ CALLBACK_URL=$CALLBACK_URL"
+
           [ -z "$BUILD_ID" ] && echo "❌ BUILD_ID missing" && exit 1
           [ -z "$ZIP_URL" ] && echo "❌ ZIP_URL missing" && exit 1
           [ -z "$CALLBACK_URL" ] && echo "❌ CALLBACK_URL missing" && exit 1
@@ -37,50 +41,79 @@ jobs:
             -d "{\"build_id\":\"$BUILD_ID\",\"step\":3,\"step_state\":\"active\",\"log\":\"iOS: 📥 Downloading iOS project files\"}" || true
 
       # --------------------------------------------------
-      # 3️⃣ Download ZIP
+      # 3️⃣ Download ZIP (FULL DIAGNOSTICS)
       # --------------------------------------------------
       - name: Download iOS ZIP
         run: |
           set -e
+          echo "⬇️ Downloading ZIP"
           curl -L "$ZIP_URL" -o ios.zip
+
+          echo "📦 ZIP file size:"
+          ls -lh ios.zip
+
+          echo "📂 ZIP listing:"
+          unzip -l ios.zip || { echo "❌ ZIP INVALID"; exit 1; }
+
           unzip ios.zip
+          echo "📂 Workspace tree:"
+          find . -maxdepth 4
 
       # --------------------------------------------------
-      # 4️⃣ Install XcodeGen (CRITICAL)
+      # 4️⃣ Install XcodeGen
       # --------------------------------------------------
       - name: Install XcodeGen
         run: |
-          brew install xcodegen
+          set -e
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            echo "🔧 Installing XcodeGen"
+            brew install xcodegen
+          else
+            echo "✅ XcodeGen already installed"
+          fi
+          xcodegen --version
 
       # --------------------------------------------------
-      # 5️⃣ Generate Xcode project from project.yml
+      # 5️⃣ Generate Xcode Project
       # --------------------------------------------------
       - name: Generate Xcode Project
         run: |
           set -e
-          IOS_DIR=$(find ios -name "project.yml" | head -n 1 | xargs dirname)
+          echo "🔍 Searching for project.yml"
+          find . -name project.yml || true
+
+          IOS_DIR=$(find . -name project.yml | head -n 1 | xargs dirname)
+
           if [ -z "$IOS_DIR" ]; then
-            echo "❌ project.yml not found"
+            echo "❌ project.yml NOT FOUND"
+            echo "📂 Full workspace dump:"
+            find . -maxdepth 6
             exit 1
           fi
 
+          echo "📁 IOS_DIR=$IOS_DIR"
           cd "$IOS_DIR"
+
+          echo "🧱 Running xcodegen generate"
           xcodegen generate
+
+          echo "📂 Generated files:"
+          ls -la
+
           echo "IOS_DIR=$IOS_DIR" >> $GITHUB_ENV
-          echo "📁 Xcode project generated in $IOS_DIR"
 
       # --------------------------------------------------
-      # 6️⃣ Callback — Generating Xcode Project
+      # 6️⃣ Callback — Xcode Project Generated
       # --------------------------------------------------
       - name: Callback — Generating Xcode Project
         run: |
           curl -s -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
             -H "x-novabridge-token: $CALLBACK_TOKEN" \
+            -H "Content-Type: application/json" \
             -d "{\"build_id\":\"$BUILD_ID\",\"step\":4,\"step_state\":\"active\",\"log\":\"iOS: 🧱 Xcode project generated\"}" || true
 
       # --------------------------------------------------
-      # 7️⃣ Detect project + scheme (TRIMMED)
+      # 7️⃣ Detect project + scheme (TRIM SAFE)
       # --------------------------------------------------
       - name: Detect Scheme
         run: |
@@ -102,12 +135,12 @@ jobs:
             exit 1
           fi
 
+          echo "🎯 Using scheme: $SCHEME"
           echo "PROJECT_PATH=$PROJECT_PATH" >> $GITHUB_ENV
           echo "SCHEME=$SCHEME" >> $GITHUB_ENV
-          echo "🎯 Building scheme: $SCHEME"
 
       # --------------------------------------------------
-      # 8️⃣ Callback — Queued on macOS runner
+      # 8️⃣ Callback — Queued on macOS Runner
       # --------------------------------------------------
       - name: Callback — Queued on macOS Runner
         run: |
@@ -138,12 +171,13 @@ jobs:
             build
 
       # --------------------------------------------------
-      # 🔟 Package .app
+      # 🔟 Package iOS App
       # --------------------------------------------------
       - name: Package iOS Build
         run: |
           set -e
           APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -name "*.app" | head -n 1)
+
           if [ -z "$APP_PATH" ]; then
             echo "❌ .app not found"
             exit 1
