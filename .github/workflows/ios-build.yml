@@ -1,4 +1,4 @@
-name: NovaBridge iOS Build v1.1.1
+name: NovaBridge iOS Build v1.1.2
 
 on:
   repository_dispatch:
@@ -16,7 +16,7 @@ jobs:
 
     steps:
       # --------------------------------------------------
-      # 1️⃣ Validate inputs
+      # 1️⃣ Validate inputs (LOUD + CLEAR)
       # --------------------------------------------------
       - name: Validate inputs
         run: |
@@ -25,10 +25,20 @@ jobs:
           echo "➡ ZIP_URL=$ZIP_URL"
           echo "➡ CALLBACK_URL=$CALLBACK_URL"
 
+          # Print token length only (safe)
+          if [ -n "$CALLBACK_TOKEN" ]; then
+            echo "➡ CALLBACK_TOKEN_LENGTH=${#CALLBACK_TOKEN}"
+          else
+            echo "❌ CALLBACK_TOKEN is missing."
+            echo "✅ Fix: GitHub Repo → Settings → Secrets and variables → Actions → Secrets → New repository secret"
+            echo "   Name: CALLBACK_TOKEN"
+            echo "   Value: (paste the same token you set in Cloudflare Worker secret CALLBACK_TOKEN)"
+            exit 1
+          fi
+
           [ -z "$BUILD_ID" ] && echo "❌ BUILD_ID missing" && exit 1
           [ -z "$ZIP_URL" ] && echo "❌ ZIP_URL missing" && exit 1
           [ -z "$CALLBACK_URL" ] && echo "❌ CALLBACK_URL missing" && exit 1
-          [ -z "$CALLBACK_TOKEN" ] && echo "❌ CALLBACK_TOKEN missing" && exit 1
 
       # --------------------------------------------------
       # 2️⃣ Callback — Downloading Project
@@ -47,7 +57,7 @@ jobs:
         run: |
           set -e
           echo "⬇️ Downloading ZIP"
-          curl -L "$ZIP_URL" -o ios.zip
+          curl -fL "$ZIP_URL" -o ios.zip
 
           echo "📦 ZIP file size:"
           ls -lh ios.zip
@@ -93,8 +103,6 @@ jobs:
 
           echo "📁 IOS_DIR=$IOS_DIR"
           cd "$IOS_DIR"
-
-          echo "🧱 Running xcodegen generate"
           xcodegen generate
 
           echo "📂 Generated files:"
@@ -120,9 +128,10 @@ jobs:
           set -e
           cd "$IOS_DIR"
 
-          PROJECT_PATH=$(ls *.xcodeproj | head -n 1)
+          PROJECT_PATH=$(find . -maxdepth 2 -name "*.xcodeproj" | head -n 1 | sed 's|^\./||')
           if [ -z "$PROJECT_PATH" ]; then
             echo "❌ .xcodeproj not found"
+            find . -maxdepth 3
             exit 1
           fi
 
@@ -135,7 +144,8 @@ jobs:
             exit 1
           fi
 
-          echo "🎯 Using scheme: $SCHEME"
+          echo "🎯 Using project: $PROJECT_PATH"
+          echo "🎯 Using scheme:  $SCHEME"
           echo "PROJECT_PATH=$PROJECT_PATH" >> $GITHUB_ENV
           echo "SCHEME=$SCHEME" >> $GITHUB_ENV
 
@@ -191,7 +201,7 @@ jobs:
             -d "{\"build_id\":\"$BUILD_ID\",\"step\":7,\"step_state\":\"active\",\"log\":\"iOS: 📦 Packaging iOS build\"}" || true
 
       # --------------------------------------------------
-      # 1️⃣1️⃣ Upload artifact
+      # 1️⃣1️⃣ Upload artifact to GitHub
       # --------------------------------------------------
       - name: Upload iOS Artifact
         uses: actions/upload-artifact@v4
