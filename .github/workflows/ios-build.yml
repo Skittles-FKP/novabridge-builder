@@ -16,117 +16,116 @@ jobs:
       CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
 
     steps:
-      # -------------------------
-      # 0️⃣ Validate payload
-      # -------------------------
-      - name: Validate payload
+      - name: Validate payload + token
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
           echo "➡ BUILD_ID=$BUILD_ID"
           echo "➡ ZIP_URL=$ZIP_URL"
           echo "➡ CALLBACK_URL=$CALLBACK_URL"
-
-          if [ -z "$BUILD_ID" ] || [ -z "$ZIP_URL" ] || [ -z "$CALLBACK_URL" ]; then
-            echo "❌ Missing required payload values"
+          echo "➡ CALLBACK_TOKEN_LENGTH=${#CALLBACK_TOKEN}"
+          if [ -z "${BUILD_ID:-}" ] || [ -z "${ZIP_URL:-}" ] || [ -z "${CALLBACK_URL:-}" ]; then
+            echo "❌ Missing payload values"
+            exit 1
+          fi
+          if [ -z "${CALLBACK_TOKEN:-}" ]; then
+            echo "❌ CALLBACK_TOKEN missing (must be GitHub Secret)"
             exit 1
           fi
 
-      # -------------------------
-      # 1️⃣ Download ZIP
-      # -------------------------
-      - name: Download iOS ZIP
+      - name: Callback helper
+        shell: bash
         run: |
-          set -e
-          curl -L "$ZIP_URL" -o ios.zip
-          unzip ios.zip -d work
+          set -euo pipefail
+          cat > cb.sh <<'EOF'
+          cb () {
+            local payload="$1"
+            echo "➡ cb payload: $payload"
+            curl --fail-with-body -sS -X POST "$CALLBACK_URL" \
+              -H "Content-Type: application/json" \
+              -H "x-novabridge-token: $CALLBACK_TOKEN" \
+              -d "$payload" >/dev/null
+          }
+          EOF
+          chmod +x cb.sh
 
-          curl -s -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d "{
-              \"build_id\": \"$BUILD_ID\",
-              \"step\": 3,
-              \"step_state\": \"done\",
-              \"log\": \"iOS: 📥 Project ZIP downloaded\"
-            }"
+      - name: Step 3 - Download ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          source ./cb.sh
+          cb "{\"build_id\":\"$BUILD_ID\",\"step\":3,\"step_state\":\"active\",\"log\":\"iOS: 📥 Downloading iOS project files\"}"
 
-      # -------------------------
-      # 2️⃣ Install xcodegen
-      # -------------------------
+          curl -fL "$ZIP_URL" -o ios.zip
+          unzip -q ios.zip -d work
+
+          cb "{\"build_id\":\"$BUILD_ID\",\"step\":3,\"step_state\":\"done\",\"log\":\"iOS: ✅ Project ZIP downloaded\"}"
+
       - name: Install xcodegen
+        shell: bash
         run: |
+          set -euo pipefail
+          brew update
           brew install xcodegen
 
-      # -------------------------
-      # 3️⃣ Generate Xcode project
-      # -------------------------
-      - name: Generate Xcode project
+      - name: Step 4 - Generate Xcode project
+        shell: bash
         run: |
-          set -e
-          cd work/ios/NovaBridgeDemo-iOS
+          set -euo pipefail
+          source ./cb.sh
+          cb "{\"build_id\":\"$BUILD_ID\",\"step\":4,\"step_state\":\"active\",\"log\":\"iOS: 🏗 Generating Xcode project\"}"
+
+          PROJECT_YML=$(find work -name "project.yml" | head -n 1 || true)
+          if [ -z "$PROJECT_YML" ]; then
+            echo "❌ project.yml not found"
+            find work -maxdepth 4 -type f | head -n 200
+            exit 1
+          fi
+
+          IOS_DIR=$(dirname "$PROJECT_YML")
+          cd "$IOS_DIR"
           xcodegen generate
 
-          curl -s -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d "{
-              \"build_id\": \"$BUILD_ID\",
-              \"step\": 4,
-              \"step_state\": \"done\",
-              \"log\": \"iOS: 🏗 Xcode project generated\"
-            }"
+          cb "{\"build_id\":\"$BUILD_ID\",\"step\":4,\"step_state\":\"done\",\"log\":\"iOS: ✅ Xcode project generated\"}"
 
-      # -------------------------
-      # 4️⃣ Locate project + scheme
-      # -------------------------
-      - name: Locate Xcode project and scheme
-        id: locate
+      - name: Step 5 - Locate project + scheme
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
+          source ./cb.sh
 
-          XCODEPROJ=$(find work -name "*.xcodeproj" | head -n 1)
+          cb "{\"build_id\":\"$BUILD_ID\",\"step\":5,\"step_state\":\"active\",\"log\":\"iOS: 📱 Queued on macOS runner\"}"
+
+          XCODEPROJ=$(find work -name "*.xcodeproj" | head -n 1 || true)
           if [ -z "$XCODEPROJ" ]; then
-            echo "❌ No Xcode project found"
+            echo "❌ No .xcodeproj found"
+            find work -maxdepth 4 -type f | head -n 200
             exit 1
           fi
 
-          SCHEME=$(xcodebuild -list -project "$XCODEPROJ" | awk '/Schemes:/ {getline; print $1}')
-          if [ -z "$SCHEME" ]; then
+          echo "XCODEPROJ=$XCODEPROJ" >> "$GITHUB_ENV"
+
+          SCHEME=$(/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -list -project "$XCODEPROJ" \
+            | sed -n '/Schemes:/,$p' | tail -n +2 | sed 's/^[[:space:]]*//' | head -n 1)
+
+          if [ -z "${SCHEME:-}" ]; then
             echo "❌ No scheme found"
+            /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -list -project "$XCODEPROJ"
             exit 1
           fi
 
-          echo "XCODEPROJ=$XCODEPROJ" >> $GITHUB_ENV
-          echo "SCHEME=$SCHEME" >> $GITHUB_ENV
+          echo "SCHEME=$SCHEME" >> "$GITHUB_ENV"
+          cb "{\"build_id\":\"$BUILD_ID\",\"step\":5,\"step_state\":\"done\",\"log\":\"iOS: ✅ Scheme detected: $SCHEME\"}"
 
-          curl -s -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d "{
-              \"build_id\": \"$BUILD_ID\",
-              \"step\": 5,
-              \"step_state\": \"done\",
-              \"log\": \"iOS: 📱 Queued on macOS runner (scheme: $SCHEME)\"
-            }"
-
-      # -------------------------
-      # 5️⃣ Build with Xcode
-      # -------------------------
-      - name: Build iOS app
+      - name: Step 6 - Build with Xcode (unsigned)
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
+          source ./cb.sh
 
-          curl -s -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d "{
-              \"build_id\": \"$BUILD_ID\",
-              \"step\": 6,
-              \"step_state\": \"active\",
-              \"log\": \"iOS: 🔨 Building with Xcode\"
-            }"
+          cb "{\"build_id\":\"$BUILD_ID\",\"step\":6,\"step_state\":\"active\",\"log\":\"iOS: 🔨 Building with Xcode\"}"
 
-          xcodebuild \
+          /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild \
             -project "$XCODEPROJ" \
             -scheme "$SCHEME" \
             -configuration Release \
@@ -134,67 +133,42 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             build
 
-          curl -s -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d "{
-              \"build_id\": \"$BUILD_ID\",
-              \"step\": 6,
-              \"step_state\": \"done\",
-              \"log\": \"iOS: ✅ Build completed\"
-            }"
+          cb "{\"build_id\":\"$BUILD_ID\",\"step\":6,\"step_state\":\"done\",\"log\":\"iOS: ✅ Xcode build completed\"}"
 
-      # -------------------------
-      # 6️⃣ Package artifact
-      # -------------------------
-      - name: Package iOS artifact
+      - name: Step 7 - Package artifact zip
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
+          source ./cb.sh
+
+          cb "{\"build_id\":\"$BUILD_ID\",\"step\":7,\"step_state\":\"active\",\"log\":\"iOS: 📦 Packaging iOS build\"}"
           cd work
-          zip -r ios-artifact.zip .
+          zip -qr ios-artifact.zip .
+          cb "{\"build_id\":\"$BUILD_ID\",\"step\":7,\"step_state\":\"done\",\"log\":\"iOS: ✅ iOS build packaged\"}"
 
-          curl -s -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d "{
-              \"build_id\": \"$BUILD_ID\",
-              \"step\": 7,
-              \"step_state\": \"done\",
-              \"log\": \"iOS: 📦 iOS build packaged\"
-            }"
-
-      # -------------------------
-      # 7️⃣ Upload artifact + COMPLETE
-      # -------------------------
-      - name: Upload artifact to Worker
+      - name: Step 8 - Upload artifact to Worker (terminalize)
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
+          source ./cb.sh
 
-          curl -X PUT \
-            --data-binary @work/ios-artifact.zip \
-            "https://novabridge-ios-build-worker.novabridge.workers.dev/upload-artifact-ios/$BUILD_ID"
+          UPLOAD_URL="https://novabridge-ios-build-worker.novabridge.workers.dev/upload-artifact-ios/$BUILD_ID"
+          echo "⬆ Uploading: $UPLOAD_URL"
 
-          curl -s -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
+          curl --fail-with-body -sS -X PUT \
+            -H "Content-Type: application/zip" \
             -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d "{
-              \"build_id\": \"$BUILD_ID\",
-              \"status\": \"success\",
-              \"artifact_key\": \"ios/artifacts/$BUILD_ID.zip\",
-              \"log\": \"iOS: 🎉 Build complete\"
-            }"
+            --data-binary @work/ios-artifact.zip \
+            "$UPLOAD_URL" >/dev/null
 
-      # -------------------------
-      # ❌ Failure handler
-      # -------------------------
+          cb "{\"build_id\":\"$BUILD_ID\",\"status\":\"success\",\"step\":8,\"step_state\":\"done\",\"artifact_key\":\"ios/artifacts/$BUILD_ID.zip\",\"log\":\"iOS: 🎉 Complete\"}"
+
       - name: Failure callback
         if: failure()
+        shell: bash
         run: |
-          curl -s -X POST "$CALLBACK_URL" \
+          set -euo pipefail
+          curl -sS -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d "{
-              \"build_id\": \"$BUILD_ID\",
-              \"status\": \"failed\",
-              \"log\": \"iOS: ❌ Build failed in GitHub Actions\"
-            }"
+            -d "{\"build_id\":\"$BUILD_ID\",\"status\":\"failed\",\"log\":\"iOS: ❌ Build failed in GitHub Actions\"}" || true
