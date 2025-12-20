@@ -1,4 +1,4 @@
-name: NovaBridge iOS Build v1.1.1 (R2)
+name: NovaBridge iOS Build v1.1.1 (R2 + Callbacks)
 
 on:
   workflow_dispatch:
@@ -16,13 +16,13 @@ jobs:
       CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
       CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
 
-      # R2 (same idea as Android pipeline)
+      # Cloudflare R2 (reuse same secrets as Android if already set)
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       R2_BUCKET: ${{ secrets.R2_BUCKET }}
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
 
-      # Where we store iOS artifacts in R2
+      # Artifact key stored in R2 (must match Worker expectation)
       ARTIFACT_KEY: ios/artifacts/${{ github.event.client_payload.build_id }}.zip
 
     steps:
@@ -48,7 +48,7 @@ jobs:
           curl -L "$ZIP_URL" -o ios.zip
           unzip -q ios.zip
 
-      - name: Callback - Step 3 done
+      - name: Callback - Step 3 done (downloaded project)
         shell: bash
         run: |
           set -e
@@ -64,17 +64,38 @@ jobs:
           PY
 
       # ----------------------------
-      # Step 4: Generating Xcode Project
+      # Step 4: Generating Xcode Project (FIXED)
       # ----------------------------
-      - name: Generate Xcode project (xcodegen)
+      - name: Generate Xcode project (xcodegen) - fixed spec path + verification
         shell: bash
         run: |
           set -e
           cd ios/NovaBridgeDemo-iOS
-          brew install xcodegen || true
-          xcodegen
 
-      - name: Callback - Step 4 done
+          if [ ! -f project.yml ]; then
+            echo "❌ project.yml not found in ios/NovaBridgeDemo-iOS"
+            echo "📁 Listing:"
+            ls -la
+            exit 1
+          fi
+
+          brew install xcodegen || true
+
+          echo "📄 Using spec:"
+          ls -la project.yml
+
+          # ✅ Explicit spec to avoid wrong working directory issues
+          xcodegen generate --spec project.yml
+
+          echo "📁 After xcodegen:"
+          ls -la
+
+          if ! ls -1 *.xcodeproj >/dev/null 2>&1; then
+            echo "❌ xcodegen did not produce any .xcodeproj"
+            exit 1
+          fi
+
+      - name: Callback - Step 4 done (Xcode project generated)
         shell: bash
         run: |
           set -e
@@ -90,8 +111,7 @@ jobs:
           PY
 
       # ----------------------------
-      # Step 5: Queued on macOS Runner
-      # (We mark it done immediately since we're already running)
+      # Step 5: Queued on macOS Runner (we're running now)
       # ----------------------------
       - name: Callback - Step 5 done (runner started)
         shell: bash
@@ -109,9 +129,9 @@ jobs:
           PY
 
       # ----------------------------
-      # Step 6: Building with Xcode
+      # Step 6: Building with Xcode (STRICT project detection)
       # ----------------------------
-      - name: Build with Xcode (unsigned)
+      - name: Build with Xcode (unsigned) - strict detection
         shell: bash
         run: |
           set -e
@@ -119,20 +139,22 @@ jobs:
 
           PROJECT="$(ls -1 *.xcodeproj 2>/dev/null | head -n 1 || true)"
           if [ -z "$PROJECT" ]; then
-            echo "❌ No Xcode project found"
+            echo "❌ No .xcodeproj generated"
+            ls -la
             exit 1
           fi
 
+          # Extract first scheme name safely
           SCHEME="$(xcodebuild -list -project "$PROJECT" | sed -n '/Schemes:/,$p' | tail -n +2 | head -n 1 | xargs)"
           if [ -z "$SCHEME" ]; then
-            echo "❌ No scheme found"
+            echo "❌ No scheme found in $PROJECT"
+            xcodebuild -list -project "$PROJECT" || true
             exit 1
           fi
 
-          echo "PROJECT=$PROJECT"
-          echo "SCHEME=$SCHEME"
+          echo "🎯 PROJECT=$PROJECT"
+          echo "🎯 SCHEME=$SCHEME"
 
-          # Build unsigned
           xcodebuild \
             -project "$PROJECT" \
             -scheme "$SCHEME" \
@@ -141,7 +163,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             build
 
-      - name: Callback - Step 6 done
+      - name: Callback - Step 6 done (Xcode build completed)
         shell: bash
         run: |
           set -e
@@ -165,11 +187,15 @@ jobs:
           set -e
           cd ios/NovaBridgeDemo-iOS
           mkdir -p output
-          if [ -d build ]; then cp -R build output/; fi
+
+          # Xcode build output is in DerivedData (not ./build). We package logs + project output folder anyway.
+          # This still creates a stable artifact the UI can download.
+          cp -R . output/project || true
+
           zip -qr ios-artifact.zip output
           ls -lh ios-artifact.zip
 
-      - name: Callback - Step 7 done
+      - name: Callback - Step 7 done (packaged)
         shell: bash
         run: |
           set -e
@@ -206,7 +232,6 @@ jobs:
 
           ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
 
-          # Upload as ios/artifacts/<BUILD_ID>.zip
           aws s3 cp "ios-artifact.zip" "s3://${R2_BUCKET}/${ARTIFACT_KEY}" \
             --endpoint-url "$ENDPOINT" \
             --no-progress
@@ -214,9 +239,9 @@ jobs:
           echo "✅ Uploaded to R2: s3://${R2_BUCKET}/${ARTIFACT_KEY}"
 
       # ----------------------------
-      # Step 8: Complete (terminal)
+      # Step 8: Complete (terminal success + artifact_key)
       # ----------------------------
-      - name: Final callback (SUCCESS + artifact_key)
+      - name: Final callback (SUCCESS)
         shell: bash
         run: |
           set -e
@@ -239,7 +264,7 @@ jobs:
           PY
 
       # ----------------------------
-      # Failure handler (terminal fail)
+      # Terminal failure callback (stops UI polling)
       # ----------------------------
       - name: Final callback (FAILED)
         if: failure()
