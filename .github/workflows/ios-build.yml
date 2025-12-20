@@ -11,14 +11,14 @@ jobs:
     runs-on: macos-14
 
     steps:
-      - name: Debug environment
+      - name: Extract payload
         run: |
           echo "BUILD_ID=${{ github.event.client_payload.build_id }}"
           echo "ZIP_URL=${{ github.event.client_payload.zip_url }}"
           echo "CALLBACK_URL=${{ github.event.client_payload.callback_url }}"
           echo "CALLBACK_TOKEN_PRESENT=${{ secrets.CALLBACK_TOKEN != '' }}"
 
-      - name: Validate inputs (safe)
+      - name: Validate inputs (no silent failure)
         run: |
           set -e
 
@@ -33,7 +33,7 @@ jobs:
           fi
 
           if [ -z "$ZIP_URL" ]; then
-            echo "❌ ZIP_URL missing"
+            echo "❌ ZIP_URL missing from repository_dispatch payload"
             exit 1
           fi
 
@@ -47,12 +47,13 @@ jobs:
             exit 1
           fi
 
-          echo "✅ All required inputs present"
+          echo "✅ Inputs validated"
 
-      - name: Download project ZIP
+      - name: Download iOS project ZIP
         run: |
           set -e
-          curl -L "$ZIP_URL" -o ios.zip
+          echo "⬇️ Downloading ZIP from: ${{ github.event.client_payload.zip_url }}"
+          curl -fL "${{ github.event.client_payload.zip_url }}" -o ios.zip
           unzip -q ios.zip
 
       - name: Generate Xcode project
@@ -103,7 +104,6 @@ jobs:
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: auto
         run: |
           set -e
           brew install awscli || true
