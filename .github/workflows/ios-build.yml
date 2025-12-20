@@ -3,7 +3,8 @@ name: NovaBridge iOS Build v1.1.1
 on:
   workflow_dispatch:
   repository_dispatch:
-    types: [novabridge_ios_build_v1]
+    types:
+      - novabridge_ios_build_v1
 
 jobs:
   ios-build:
@@ -16,73 +17,93 @@ jobs:
       CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
 
     steps:
-      # ----------------------------------------------------
-      # 0️⃣ Sanity check
-      # ----------------------------------------------------
-      - name: 🔍 Validate payload
+      - name: Validate payload
+        shell: bash
         run: |
           set -e
-          if [ -z "$BUILD_ID" ]; then echo "❌ BUILD_ID missing"; exit 1; fi
-          if [ -z "$ZIP_URL" ]; then echo "❌ ZIP_URL missing"; exit 1; fi
-          if [ -z "$CALLBACK_URL" ]; then echo "❌ CALLBACK_URL missing"; exit 1; fi
-          if [ -z "$CALLBACK_TOKEN" ]; then echo "❌ CALLBACK_TOKEN missing"; exit 1; fi
-          echo "➡ BUILD_ID=$BUILD_ID"
-          echo "➡ ZIP_URL=$ZIP_URL"
+          if [ -z "${BUILD_ID:-}" ]; then echo "BUILD_ID missing"; exit 1; fi
+          if [ -z "${ZIP_URL:-}" ]; then echo "ZIP_URL missing"; exit 1; fi
+          if [ -z "${CALLBACK_URL:-}" ]; then echo "CALLBACK_URL missing"; exit 1; fi
+          if [ -z "${CALLBACK_TOKEN:-}" ]; then echo "CALLBACK_TOKEN missing"; exit 1; fi
+          echo "BUILD_ID=$BUILD_ID"
+          echo "ZIP_URL=$ZIP_URL"
+          echo "CALLBACK_URL=$CALLBACK_URL"
 
-      # ----------------------------------------------------
-      # 1️⃣ Download ZIP
-      # ----------------------------------------------------
-      - name: 📥 Download iOS project ZIP
+      - name: Download iOS project ZIP
+        shell: bash
         run: |
           set -e
           curl -L "$ZIP_URL" -o ios.zip
           unzip -q ios.zip
 
-      - name: 📡 Callback: Downloaded project
+      - name: Callback - Downloaded project
+        shell: bash
         run: |
-          curl -s -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d "{\"build_id\":\"$BUILD_ID\",\"step\":3,\"step_state\":\"done\",\"log\":\"iOS: 📥 Downloaded project\"}"
+          set -e
+          python3 - <<'PY'
+          import json, os, subprocess
+          payload = {
+            "build_id": os.environ["BUILD_ID"],
+            "step": 3,
+            "step_state": "done",
+            "log": "iOS: Downloaded project"
+          }
+          subprocess.check_call([
+            "curl","-sS","-X","POST", os.environ["CALLBACK_URL"],
+            "-H","Content-Type: application/json",
+            "-H", f"x-novabridge-token: {os.environ['CALLBACK_TOKEN']}",
+            "-d", json.dumps(payload)
+          ])
+          PY
 
-      # ----------------------------------------------------
-      # 2️⃣ Generate Xcode project
-      # ----------------------------------------------------
-      - name: 🧩 Generate Xcode project (xcodegen)
+      - name: Generate Xcode project (xcodegen)
+        shell: bash
         run: |
           set -e
           cd ios/NovaBridgeDemo-iOS
           brew install xcodegen || true
           xcodegen
 
-      - name: 📡 Callback: Xcode project generated
+      - name: Callback - Xcode project generated
+        shell: bash
         run: |
-          curl -s -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d "{\"build_id\":\"$BUILD_ID\",\"step\":4,\"step_state\":\"done\",\"log\":\"iOS: 🧩 Xcode project generated\"}"
+          set -e
+          python3 - <<'PY'
+          import json, os, subprocess
+          payload = {
+            "build_id": os.environ["BUILD_ID"],
+            "step": 4,
+            "step_state": "done",
+            "log": "iOS: Xcode project generated"
+          }
+          subprocess.check_call([
+            "curl","-sS","-X","POST", os.environ["CALLBACK_URL"],
+            "-H","Content-Type: application/json",
+            "-H", f"x-novabridge-token: {os.environ['CALLBACK_TOKEN']}",
+            "-d", json.dumps(payload)
+          ])
+          PY
 
-      # ----------------------------------------------------
-      # 3️⃣ Build with Xcode (NO SIGNING)
-      # ----------------------------------------------------
-      - name: 🔨 Build with Xcode (unsigned)
+      - name: Build with Xcode (unsigned)
+        shell: bash
         run: |
           set -e
           cd ios/NovaBridgeDemo-iOS
 
-          PROJECT=$(ls *.xcodeproj | head -n 1)
+          PROJECT="$(ls -1 *.xcodeproj 2>/dev/null | head -n 1 || true)"
           if [ -z "$PROJECT" ]; then
-            echo "❌ No Xcode project found"
+            echo "No Xcode project found"
             exit 1
           fi
 
-          SCHEME=$(xcodebuild -list -project "$PROJECT" | sed -n '/Schemes:/,$p' | tail -n +2 | head -n 1 | xargs)
+          SCHEME="$(xcodebuild -list -project "$PROJECT" | sed -n '/Schemes:/,$p' | tail -n +2 | head -n 1 | xargs)"
           if [ -z "$SCHEME" ]; then
-            echo "❌ No scheme found"
+            echo "No scheme found"
             exit 1
           fi
 
-          echo "🎯 Building $SCHEME"
+          echo "PROJECT=$PROJECT"
+          echo "SCHEME=$SCHEME"
 
           xcodebuild \
             -project "$PROJECT" \
@@ -92,46 +113,79 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             build
 
-      - name: 📡 Callback: Xcode build complete
+      - name: Callback - Xcode build complete
+        shell: bash
         run: |
-          curl -s -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d "{\"build_id\":\"$BUILD_ID\",\"step\":6,\"step_state\":\"done\",\"log\":\"iOS: 🔨 Xcode build completed\"}"
+          set -e
+          python3 - <<'PY'
+          import json, os, subprocess
+          payload = {
+            "build_id": os.environ["BUILD_ID"],
+            "step": 6,
+            "step_state": "done",
+            "log": "iOS: Xcode build completed"
+          }
+          subprocess.check_call([
+            "curl","-sS","-X","POST", os.environ["CALLBACK_URL"],
+            "-H","Content-Type: application/json",
+            "-H", f"x-novabridge-token: {os.environ['CALLBACK_TOKEN']}",
+            "-d", json.dumps(payload)
+          ])
+          PY
 
-      # ----------------------------------------------------
-      # 4️⃣ Package artifact
-      # ----------------------------------------------------
-      - name: 📦 Package iOS build
+      - name: Package iOS build
+        shell: bash
         run: |
           set -e
           cd ios/NovaBridgeDemo-iOS
           mkdir -p output
-          cp -R build output/ || true
+          if [ -d build ]; then cp -R build output/; fi
           zip -qr ios-artifact.zip output
 
-      - name: 📡 Callback: Packaging complete
+      - name: Callback - Packaging complete
+        shell: bash
         run: |
-          curl -s -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d "{\"build_id\":\"$BUILD_ID\",\"step\":7,\"step_state\":\"done\",\"log\":\"iOS: 📦 Build packaged\"}"
+          set -e
+          python3 - <<'PY'
+          import json, os, subprocess
+          payload = {
+            "build_id": os.environ["BUILD_ID"],
+            "step": 7,
+            "step_state": "done",
+            "log": "iOS: Build packaged"
+          }
+          subprocess.check_call([
+            "curl","-sS","-X","POST", os.environ["CALLBACK_URL"],
+            "-H","Content-Type: application/json",
+            "-H", f"x-novabridge-token: {os.environ['CALLBACK_TOKEN']}",
+            "-d", json.dumps(payload)
+          ])
+          PY
 
-      # ----------------------------------------------------
-      # 5️⃣ Upload artifact
-      # ----------------------------------------------------
-      - name: ☁️ Upload artifact
+      - name: Upload artifact to GitHub Actions
         uses: actions/upload-artifact@v4
         with:
           name: ios-build-${{ env.BUILD_ID }}
           path: ios/NovaBridgeDemo-iOS/ios-artifact.zip
 
-      # ----------------------------------------------------
-      # 6️⃣ FINAL CALLBACK (terminal)
-      # ----------------------------------------------------
-      - name: ✅ Final callback (SUCCESS)
+      - name: Final callback (SUCCESS)
+        shell: bash
         run: |
-          curl -s -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d "{\"build_id\":\"$BUILD_ID\",\"status\":\"success\",\"step\":8,\"artifact_key\":\"ios/artifacts/$BUILD_ID.zip\",\"log\":\"iOS: ✅ Build complete\"}"
+          set -e
+          python3 - <<'PY'
+          import json, os, subprocess
+          payload = {
+            "build_id": os.environ["BUILD_ID"],
+            "status": "success",
+            "step": 8,
+            "step_state": "done",
+            "artifact_key": f"ios/artifacts/{os.environ['BUILD_ID']}.zip",
+            "log": "iOS: Build complete"
+          }
+          subprocess.check_call([
+            "curl","-sS","-X","POST", os.environ["CALLBACK_URL"],
+            "-H","Content-Type: application/json",
+            "-H", f"x-novabridge-token: {os.environ['CALLBACK_TOKEN']}",
+            "-d", json.dumps(payload)
+          ])
+          PY
