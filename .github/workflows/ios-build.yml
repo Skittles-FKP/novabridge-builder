@@ -54,10 +54,10 @@ jobs:
           unzip ios.zip -d work
 
           echo "📁 Contents:"
-          find work -maxdepth 4 -print
+          find work -maxdepth 5 -print
 
       # ------------------------------------------------------------
-      # 4️⃣ Generate Xcode project (xcodegen)
+      # 4️⃣ Generate Xcode project
       # ------------------------------------------------------------
       - name: 🏗 Generate Xcode project
         shell: bash
@@ -77,11 +77,11 @@ jobs:
           cd "$IOS_DIR"
           xcodegen generate
 
-          echo "📦 Generated:"
-          find . -maxdepth 2 -name "*.xcodeproj" -print
+          echo "📦 Generated projects:"
+          find . -name "*.xcodeproj" -print
 
       # ------------------------------------------------------------
-      # 5️⃣ Locate project + scheme (BSD-awk safe)
+      # 5️⃣ Locate project + scheme (FIXED)
       # ------------------------------------------------------------
       - name: 🔎 Locate Xcode project + scheme
         shell: bash
@@ -99,17 +99,15 @@ jobs:
 
           xcodebuild -list -project "$XCODEPROJ" | tee schemes.txt
 
-          SCHEME=$(awk '
-            /^Schemes:/ { found=1; next }
-            found && /^[[:space:]]*[A-Za-z0-9_.-]+$/ {
-              gsub(/^[[:space:]]+/, "", $0)
-              print $0
-              exit
-            }
-          ' schemes.txt)
+          # ✅ ROBUST scheme extraction (BSD awk safe)
+          SCHEME=$(sed -n '/Schemes:/,$p' schemes.txt \
+            | tail -n +2 \
+            | sed 's/^[[:space:]]*//' \
+            | sed '/^$/d' \
+            | head -n 1)
 
           if [ -z "$SCHEME" ]; then
-            echo "❌ No scheme found"
+            echo "❌ No scheme found (after parsing)"
             cat schemes.txt
             exit 1
           fi
@@ -136,7 +134,7 @@ jobs:
             build
 
       # ------------------------------------------------------------
-      # 7️⃣ Package build artifact
+      # 7️⃣ Package artifact
       # ------------------------------------------------------------
       - name: 📦 Package iOS build artifact
         shell: bash
@@ -154,8 +152,6 @@ jobs:
           cd artifact
           zip -r ios-build.zip App.app
 
-          echo "📦 Artifact ready"
-
       # ------------------------------------------------------------
       # 8️⃣ Upload artifact
       # ------------------------------------------------------------
@@ -166,13 +162,11 @@ jobs:
           path: artifact/ios-build.zip
 
       # ------------------------------------------------------------
-      # 9️⃣ Callback SUCCESS → Worker (ends UI polling)
+      # 9️⃣ Callback SUCCESS
       # ------------------------------------------------------------
       - name: 🔁 Callback success
         shell: bash
         run: |
-          set -e
-
           curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -H "x-novabridge-token: $CALLBACK_TOKEN" \
@@ -185,7 +179,7 @@ jobs:
             }"
 
       # ------------------------------------------------------------
-      # ❌ Failure handler (always notifies Worker)
+      # ❌ Callback failure
       # ------------------------------------------------------------
       - name: ❌ Callback failure
         if: failure()
