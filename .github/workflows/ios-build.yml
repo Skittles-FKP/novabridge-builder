@@ -1,13 +1,12 @@
 name: NovaBridge iOS Build
 
 on:
-  workflow_dispatch:
   repository_dispatch:
     types: [novabridge_ios_build_v1]
 
 jobs:
-  ios-build:
-    runs-on: macos-latest
+  build-ios:
+    runs-on: macos-14
 
     env:
       BUILD_ID: ${{ github.event.client_payload.build_id }}
@@ -16,107 +15,45 @@ jobs:
       CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Validate inputs
+      - name: Validate input
         run: |
           set -e
-          echo "➡ BUILD_ID=$BUILD_ID"
-          echo "➡ ZIP_URL=$ZIP_URL"
-          echo "➡ CALLBACK_URL=$CALLBACK_URL"
+          test -n "$BUILD_ID"
+          test -n "$ZIP_URL"
+          test -n "$CALLBACK_URL"
+          test -n "$CALLBACK_TOKEN"
 
-          if [ -z "$BUILD_ID" ] || [ -z "$ZIP_URL" ] || [ -z "$CALLBACK_URL" ]; then
-            echo "❌ Missing required inputs"
-            exit 1
-          fi
-
-      - name: Download iOS ZIP
+      - name: Download ZIP
         run: |
-          set -e
           curl -L "$ZIP_URL" -o ios.zip
           unzip ios.zip
 
       - name: Install XcodeGen
-        run: |
-          set -e
-          if ! command -v xcodegen >/dev/null 2>&1; then
-            brew install xcodegen
-          fi
-          xcodegen --version
+        run: brew install xcodegen
 
       - name: Generate Xcode project
         run: |
-          set -e
           cd ios/NovaBridgeDemo-iOS
+          xcodegen generate
 
-          echo "📂 Contents before generation:"
-          ls -la
-
-          if [ ! -f project.yml ]; then
-            echo "❌ project.yml not found"
-            exit 1
-          fi
-
-          echo "🛠 Running XcodeGen..."
-          xcodegen generate --spec project.yml
-
-          echo "📂 Contents after generation:"
-          ls -la
-
-          PROJECT_PATH=$(find . -maxdepth 1 -name "*.xcodeproj" | head -n 1)
-
-          if [ -z "$PROJECT_PATH" ]; then
-            echo "❌ No .xcodeproj generated"
-            exit 1
-          fi
-
-          echo "✅ Generated project: $PROJECT_PATH"
-          echo "PROJECT_PATH=$PROJECT_PATH" >> $GITHUB_ENV
-
-      - name: Build with Xcode
+      - name: Build (unsigned)
         run: |
-          set -e
           cd ios/NovaBridgeDemo-iOS
-
-          echo "📦 Using project: $PROJECT_PATH"
-
-          echo "🔍 Listing schemes..."
-          xcodebuild -list -project "$PROJECT_PATH"
-
-          SCHEME=$(xcodebuild -list -project "$PROJECT_PATH" \
-            | sed -n '/Schemes:/,$p' | tail -n +2 | head -n 1 | xargs)
-
-          if [ -z "$SCHEME" ]; then
-            echo "❌ No scheme found"
-            exit 1
-          fi
-
-          echo "🎯 Building scheme: $SCHEME"
-
           xcodebuild \
-            -project "$PROJECT_PATH" \
-            -scheme "$SCHEME" \
+            -project NovaBridgeDemo.xcodeproj \
+            -scheme NovaBridgeDemo \
             -configuration Release \
             -destination generic/platform=iOS \
-            CODE_SIGNING_ALLOWED=NO \
-            build
+            CODE_SIGNING_ALLOWED=NO build
 
       - name: Package artifact
         run: |
-          set -e
-          mkdir -p artifact
-          find ios/NovaBridgeDemo-iOS -name "*.app" -maxdepth 4 -exec cp -R {} artifact \;
-          zip -r ios-artifact.zip artifact
+          cd ios/NovaBridgeDemo-iOS
+          zip -r app.zip build
 
-      - name: Notify Worker (success)
+      - name: Callback success
         run: |
-          set -e
           curl -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
             -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d "{
-              \"build_id\": \"$BUILD_ID\",
-              \"status\": \"success\",
-              \"artifact_key\": \"ios/artifacts/$BUILD_ID.zip\"
-            }"
+            -H "Content-Type: application/json" \
+            -d '{"build_id":"'"$BUILD_ID"'","status":"success","step":8}'
