@@ -1,47 +1,132 @@
-name: NovaBridge iOS Build (FINAL)
+name: NovaBridge iOS Build (Generated Project)
 
 on:
   repository_dispatch:
     types: [novabridge_ios_build_v1]
+  workflow_dispatch:
 
 jobs:
   ios-build:
-    runs-on: macos-14
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    env:
+      BUILD_ID: ${{ github.event.client_payload.build_id }}
+      ZIP_URL: ${{ github.event.client_payload.zip_url }}
+      CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
+      CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Validate payload
+      # ------------------------------------------------------------
+      # 1️⃣ Validate payload
+      # ------------------------------------------------------------
+      - name: ✅ Validate payload
+        shell: bash
         run: |
           set -e
-          echo "➡ BUILD_ID=${{ github.event.client_payload.build_id }}"
-          echo "➡ CALLBACK_URL=${{ github.event.client_payload.callback_url }}"
+          echo "➡ BUILD_ID=$BUILD_ID"
+          echo "➡ ZIP_URL=$ZIP_URL"
+          echo "➡ CALLBACK_URL=$CALLBACK_URL"
 
-      - name: Locate Xcode project
+          if [ -z "$BUILD_ID" ] || [ -z "$ZIP_URL" ] || [ -z "$CALLBACK_URL" ]; then
+            echo "❌ Missing required payload values"
+            exit 1
+          fi
+
+      # ------------------------------------------------------------
+      # 2️⃣ Install xcodegen
+      # ------------------------------------------------------------
+      - name: 🔧 Install xcodegen
+        shell: bash
         run: |
           set -e
-          XCODEPROJ=$(find . -name "*.xcodeproj" | head -n 1)
+          brew update
+          brew install xcodegen
+
+      # ------------------------------------------------------------
+      # 3️⃣ Download build ZIP
+      # ------------------------------------------------------------
+      - name: 📥 Download iOS build ZIP
+        shell: bash
+        run: |
+          set -e
+          curl -L "$ZIP_URL" -o ios.zip
+          unzip ios.zip -d work
+
+          echo "📁 Contents:"
+          find work -maxdepth 4 -print
+
+      # ------------------------------------------------------------
+      # 4️⃣ Generate Xcode project (xcodegen)
+      # ------------------------------------------------------------
+      - name: 🏗 Generate Xcode project
+        shell: bash
+        run: |
+          set -e
+
+          PROJECT_YML=$(find work -name "project.yml" | head -n 1)
+          if [ -z "$PROJECT_YML" ]; then
+            echo "❌ project.yml not found"
+            find work -print
+            exit 1
+          fi
+
+          IOS_DIR=$(dirname "$PROJECT_YML")
+          echo "📁 Using iOS dir: $IOS_DIR"
+
+          cd "$IOS_DIR"
+          xcodegen generate
+
+          echo "📦 Generated:"
+          find . -maxdepth 2 -name "*.xcodeproj" -print
+
+      # ------------------------------------------------------------
+      # 5️⃣ Locate project + scheme (BSD-awk safe)
+      # ------------------------------------------------------------
+      - name: 🔎 Locate Xcode project + scheme
+        shell: bash
+        run: |
+          set -e
+
+          XCODEPROJ=$(find work -name "*.xcodeproj" | head -n 1)
           if [ -z "$XCODEPROJ" ]; then
             echo "❌ No Xcode project found"
+            find work -print
             exit 1
           fi
-          echo "XCODEPROJ=$XCODEPROJ" >> $GITHUB_ENV
 
-      - name: Resolve scheme
-        run: |
-          set -e
-          SCHEME=$(xcodebuild -list -project "$XCODEPROJ" \
-            | sed -n '/Schemes:/,$p' | tail -n +2 | head -n 1 | tr -d ' ')
+          echo "📦 XCODEPROJ=$XCODEPROJ"
+
+          xcodebuild -list -project "$XCODEPROJ" | tee schemes.txt
+
+          SCHEME=$(awk '
+            /^Schemes:/ { found=1; next }
+            found && /^[[:space:]]*[A-Za-z0-9_.-]+$/ {
+              gsub(/^[[:space:]]+/, "", $0)
+              print $0
+              exit
+            }
+          ' schemes.txt)
+
           if [ -z "$SCHEME" ]; then
             echo "❌ No scheme found"
+            cat schemes.txt
             exit 1
           fi
+
+          echo "🎯 SCHEME=$SCHEME"
+
+          echo "XCODEPROJ=$XCODEPROJ" >> $GITHUB_ENV
           echo "SCHEME=$SCHEME" >> $GITHUB_ENV
 
-      - name: Build iOS app
+      # ------------------------------------------------------------
+      # 6️⃣ Build iOS app (unsigned)
+      # ------------------------------------------------------------
+      - name: 🔨 Build iOS app
+        shell: bash
         run: |
           set -e
+
           xcodebuild \
             -project "$XCODEPROJ" \
             -scheme "$SCHEME" \
@@ -50,26 +135,69 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             build
 
-      - name: Notify success
+      # ------------------------------------------------------------
+      # 7️⃣ Package build artifact
+      # ------------------------------------------------------------
+      - name: 📦 Package iOS build artifact
+        shell: bash
         run: |
-          curl -X POST "${{ github.event.client_payload.callback_url }}" \
-            -H "Content-Type: application/json" \
-            -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
-            -d '{
-              "build_id": "${{ github.event.client_payload.build_id }}",
-              "status": "success",
-              "step": 8,
-              "step_state": "done",
-              "artifact_url": "ios-build-complete"
-            }'
+          set -e
 
-      - name: Notify failure
-        if: failure()
+          APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -name "*.app" | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "❌ .app not found"
+            exit 1
+          fi
+
+          mkdir -p artifact
+          cp -R "$APP_PATH" artifact/App.app
+          cd artifact
+          zip -r ios-build.zip App.app
+
+          echo "📦 Artifact ready"
+
+      # ------------------------------------------------------------
+      # 8️⃣ Upload artifact
+      # ------------------------------------------------------------
+      - name: ☁️ Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-${{ env.BUILD_ID }}
+          path: artifact/ios-build.zip
+
+      # ------------------------------------------------------------
+      # 9️⃣ Callback SUCCESS → Worker (ends UI polling)
+      # ------------------------------------------------------------
+      - name: 🔁 Callback success
+        shell: bash
         run: |
-          curl -X POST "${{ github.event.client_payload.callback_url }}" \
+          set -e
+
+          curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
-            -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
-            -d '{
-              "build_id": "${{ github.event.client_payload.build_id }}",
-              "status": "failed"
-            }'
+            -H "x-novabridge-token: $CALLBACK_TOKEN" \
+            -d "{
+              \"build_id\": \"$BUILD_ID\",
+              \"status\": \"success\",
+              \"step\": 8,
+              \"step_state\": \"done\",
+              \"artifact_key\": \"ios/artifacts/$BUILD_ID.zip\"
+            }"
+
+      # ------------------------------------------------------------
+      # ❌ Failure handler (always notifies Worker)
+      # ------------------------------------------------------------
+      - name: ❌ Callback failure
+        if: failure()
+        shell: bash
+        run: |
+          curl -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-novabridge-token: $CALLBACK_TOKEN" \
+            -d "{
+              \"build_id\": \"$BUILD_ID\",
+              \"status\": \"failed\",
+              \"step\": 6,
+              \"step_state\": \"failed\",
+              \"error\": \"GitHub Actions build failed\"
+            }"
