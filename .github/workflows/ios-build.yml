@@ -14,24 +14,19 @@ jobs:
       CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
 
     steps:
-      # ------------------------------------------------------------
-      # 1️⃣ Validate payload
-      # ------------------------------------------------------------
       - name: 🔎 Validate payload
         run: |
           set -e
           echo "➡ BUILD_ID=$BUILD_ID"
           echo "➡ ZIP_URL=$ZIP_URL"
           echo "➡ CALLBACK_URL=$CALLBACK_URL"
+          echo "➡ CALLBACK_TOKEN_LENGTH=${#CALLBACK_TOKEN}"
 
-          [ -z "$BUILD_ID" ] && exit 1
-          [ -z "$ZIP_URL" ] && exit 1
-          [ -z "$CALLBACK_URL" ] && exit 1
-          [ -z "$CALLBACK_TOKEN" ] && exit 1
+          if [ -z "$BUILD_ID" ]; then echo "❌ BUILD_ID missing"; exit 1; fi
+          if [ -z "$ZIP_URL" ]; then echo "❌ ZIP_URL missing"; exit 1; fi
+          if [ -z "$CALLBACK_URL" ]; then echo "❌ CALLBACK_URL missing"; exit 1; fi
+          if [ -z "$CALLBACK_TOKEN" ]; then echo "❌ CALLBACK_TOKEN missing (GitHub Secret)"; exit 1; fi
 
-      # ------------------------------------------------------------
-      # 2️⃣ Download & unzip
-      # ------------------------------------------------------------
       - name: 📥 Download iOS ZIP
         run: |
           set -e
@@ -45,14 +40,10 @@ jobs:
             -H "Content-Type: application/json" \
             -d "{\"build_id\":\"$BUILD_ID\",\"step\":3,\"step_state\":\"done\",\"log\":\"iOS: 📥 Project downloaded\"}"
 
-      # ------------------------------------------------------------
-      # 3️⃣ Locate Xcode project (FIXED)
-      # ------------------------------------------------------------
       - name: 📁 Locate Xcode project
         run: |
           set -e
-
-          IOS_DIR=$(find ios -name "*.xcodeproj" -maxdepth 4 | head -n 1 | xargs dirname)
+          IOS_DIR=$(find ios -name "*.xcodeproj" -maxdepth 6 | head -n 1 | xargs dirname)
 
           if [ -z "$IOS_DIR" ]; then
             echo "❌ No Xcode project found under /ios"
@@ -68,9 +59,6 @@ jobs:
             -H "Content-Type: application/json" \
             -d "{\"build_id\":\"$BUILD_ID\",\"step\":4,\"step_state\":\"done\",\"log\":\"iOS: 🧩 Xcode project located\"}"
 
-      # ------------------------------------------------------------
-      # 4️⃣ Build with Xcode
-      # ------------------------------------------------------------
       - name: 🔨 Build iOS app
         run: |
           set -e
@@ -106,15 +94,15 @@ jobs:
             -H "Content-Type: application/json" \
             -d "{\"build_id\":\"$BUILD_ID\",\"step\":6,\"step_state\":\"done\",\"log\":\"iOS: ✅ Build completed\"}"
 
-      # ------------------------------------------------------------
-      # 5️⃣ Package artifact
-      # ------------------------------------------------------------
       - name: 📦 Package iOS build
         run: |
           set -e
           APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -name "*.app" | head -n 1)
 
-          [ -z "$APP_PATH" ] && exit 1
+          if [ -z "$APP_PATH" ]; then
+            echo "❌ No .app found"
+            exit 1
+          fi
 
           mkdir -p artifact
           cp -R "$APP_PATH" artifact/
@@ -125,10 +113,7 @@ jobs:
             -H "Content-Type: application/json" \
             -d "{\"build_id\":\"$BUILD_ID\",\"step\":7,\"step_state\":\"done\",\"log\":\"iOS: 📦 Artifact packaged\"}"
 
-      # ------------------------------------------------------------
-      # 6️⃣ Upload artifact
-      # ------------------------------------------------------------
-      - name: ☁️ Upload artifact
+      - name: ☁️ Upload artifact to Worker
         run: |
           set -e
           curl -f -X PUT \
@@ -136,9 +121,6 @@ jobs:
             -H "x-novabridge-token: $CALLBACK_TOKEN" \
             --data-binary "@ios-artifact.zip"
 
-      # ------------------------------------------------------------
-      # 7️⃣ Finalize
-      # ------------------------------------------------------------
       - name: ✅ Finalize build
         run: |
           set -e
