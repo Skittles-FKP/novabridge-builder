@@ -1,3 +1,42 @@
+name: NovaBridge iOS Build
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [novabridge_ios_build_v1]
+
+jobs:
+  ios-build:
+    runs-on: macos-latest
+
+    env:
+      BUILD_ID: ${{ github.event.client_payload.build_id }}
+      ZIP_URL: ${{ github.event.client_payload.zip_url }}
+      CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
+      CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate inputs
+        run: |
+          set -e
+          echo "➡ BUILD_ID=$BUILD_ID"
+          echo "➡ ZIP_URL=$ZIP_URL"
+          echo "➡ CALLBACK_URL=$CALLBACK_URL"
+
+          if [ -z "$BUILD_ID" ] || [ -z "$ZIP_URL" ] || [ -z "$CALLBACK_URL" ]; then
+            echo "❌ Missing required inputs"
+            exit 1
+          fi
+
+      - name: Download iOS ZIP
+        run: |
+          set -e
+          curl -L "$ZIP_URL" -o ios.zip
+          unzip ios.zip
+
       - name: Install XcodeGen
         run: |
           set -e
@@ -20,12 +59,12 @@
           echo "📦 Generating Xcode project..."
           xcodegen generate --spec project.yml
 
-          echo "📁 Directory contents after generation:"
+          echo "📁 After generation:"
           ls -la
 
           PROJECT=$(ls *.xcodeproj 2>/dev/null || true)
           if [ -z "$PROJECT" ]; then
-            echo "❌ Xcode project was not generated"
+            echo "❌ Xcode project not generated"
             exit 1
           fi
 
@@ -59,3 +98,22 @@
             -destination generic/platform=iOS \
             CODE_SIGNING_ALLOWED=NO \
             build
+
+      - name: Package artifact
+        run: |
+          set -e
+          mkdir -p artifact
+          cp -R ios/NovaBridgeDemo-iOS/*.app artifact || true
+          zip -r ios-artifact.zip artifact
+
+      - name: Upload artifact to Worker
+        run: |
+          set -e
+          curl -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-novabridge-token: $CALLBACK_TOKEN" \
+            -d "{
+              \"build_id\": \"$BUILD_ID\",
+              \"status\": \"success\",
+              \"artifact_key\": \"ios/artifacts/$BUILD_ID.zip\"
+            }"
