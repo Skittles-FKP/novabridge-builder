@@ -1,4 +1,4 @@
-name: NovaBridge iOS Build (FINAL)
+name: NovaBridge iOS Build (STABLE)
 
 on:
   workflow_dispatch:
@@ -10,26 +10,44 @@ jobs:
   ios-build:
     runs-on: macos-14
 
-    env:
-      BUILD_ID: ${{ github.event.client_payload.build_id }}
-      ZIP_URL: ${{ github.event.client_payload.zip_url }}
-      CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
-      CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
-
-      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      R2_BUCKET: ${{ secrets.R2_BUCKET }}
-      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-
-      ARTIFACT_KEY: ios/artifacts/${{ github.event.client_payload.build_id }}.zip
-
     steps:
-      - name: Validate inputs
+      - name: Debug environment
+        run: |
+          echo "BUILD_ID=${{ github.event.client_payload.build_id }}"
+          echo "ZIP_URL=${{ github.event.client_payload.zip_url }}"
+          echo "CALLBACK_URL=${{ github.event.client_payload.callback_url }}"
+          echo "CALLBACK_TOKEN_PRESENT=${{ secrets.CALLBACK_TOKEN != '' }}"
+
+      - name: Validate inputs (safe)
         run: |
           set -e
-          for v in BUILD_ID ZIP_URL CALLBACK_URL CALLBACK_TOKEN; do
-            [ -z "${!v}" ] && echo "❌ $v missing" && exit 1
-          done
+
+          BUILD_ID="${{ github.event.client_payload.build_id }}"
+          ZIP_URL="${{ github.event.client_payload.zip_url }}"
+          CALLBACK_URL="${{ github.event.client_payload.callback_url }}"
+          CALLBACK_TOKEN="${{ secrets.CALLBACK_TOKEN }}"
+
+          if [ -z "$BUILD_ID" ]; then
+            echo "❌ BUILD_ID missing"
+            exit 1
+          fi
+
+          if [ -z "$ZIP_URL" ]; then
+            echo "❌ ZIP_URL missing"
+            exit 1
+          fi
+
+          if [ -z "$CALLBACK_URL" ]; then
+            echo "❌ CALLBACK_URL missing"
+            exit 1
+          fi
+
+          if [ -z "$CALLBACK_TOKEN" ]; then
+            echo "❌ CALLBACK_TOKEN missing (check repo secrets)"
+            exit 1
+          fi
+
+          echo "✅ All required inputs present"
 
       - name: Download project ZIP
         run: |
@@ -37,7 +55,7 @@ jobs:
           curl -L "$ZIP_URL" -o ios.zip
           unzip -q ios.zip
 
-      - name: Generate Xcode project (xcodegen)
+      - name: Generate Xcode project
         run: |
           set -e
           cd ios/NovaBridgeDemo-iOS
@@ -45,18 +63,27 @@ jobs:
           xcodegen generate --spec project.yml
           ls -la
 
-      - name: Build with Xcode (SAFE MODE)
+      - name: Build with Xcode
         run: |
           set -e
           cd ios/NovaBridgeDemo-iOS
 
           PROJECT=$(ls *.xcodeproj | head -n 1)
-          echo "📦 Using project: $PROJECT"
+          if [ -z "$PROJECT" ]; then
+            echo "❌ No .xcodeproj found"
+            exit 1
+          fi
 
           SCHEME=$(xcodebuild -list -project "$PROJECT" \
             | sed -n '/Schemes:/,$p' | tail -n +2 | head -n 1 | xargs)
 
-          echo "🎯 Using scheme: $SCHEME"
+          if [ -z "$SCHEME" ]; then
+            echo "❌ No scheme found"
+            exit 1
+          fi
+
+          echo "📦 Project: $PROJECT"
+          echo "🎯 Scheme: $SCHEME"
 
           xcodebuild \
             -project "$PROJECT" \
@@ -72,28 +99,30 @@ jobs:
           cd ios/NovaBridgeDemo-iOS
           zip -qr ios-artifact.zip .
 
-      - name: Upload to R2
+      - name: Upload artifact to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
         run: |
           set -e
           brew install awscli || true
-          export AWS_ACCESS_KEY_ID=$R2_ACCESS_KEY_ID
-          export AWS_SECRET_ACCESS_KEY=$R2_SECRET_ACCESS_KEY
-          export AWS_DEFAULT_REGION=auto
           aws s3 cp ios/NovaBridgeDemo-iOS/ios-artifact.zip \
-            s3://$R2_BUCKET/$ARTIFACT_KEY \
-            --endpoint-url https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com
+            s3://${{ secrets.R2_BUCKET }}/ios/artifacts/${{ github.event.client_payload.build_id }}.zip \
+            --endpoint-url https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
 
       - name: Callback SUCCESS
+        if: success()
         run: |
-          curl -sS -X POST "$CALLBACK_URL" \
+          curl -sS -X POST "${{ github.event.client_payload.callback_url }}" \
             -H "Content-Type: application/json" \
-            -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d "{\"build_id\":\"$BUILD_ID\",\"status\":\"success\",\"artifact_key\":\"$ARTIFACT_KEY\"}"
+            -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
+            -d "{\"build_id\":\"${{ github.event.client_payload.build_id }}\",\"status\":\"success\",\"artifact_key\":\"ios/artifacts/${{ github.event.client_payload.build_id }}.zip\"}"
 
       - name: Callback FAILED
         if: failure()
         run: |
-          curl -sS -X POST "$CALLBACK_URL" \
+          curl -sS -X POST "${{ github.event.client_payload.callback_url }}" \
             -H "Content-Type: application/json" \
-            -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d "{\"build_id\":\"$BUILD_ID\",\"status\":\"failed\"}"
+            -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
+            -d "{\"build_id\":\"${{ github.event.client_payload.build_id }}\",\"status\":\"failed\"}"
