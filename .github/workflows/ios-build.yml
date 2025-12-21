@@ -1,4 +1,4 @@
-name: NovaBridge iOS Cloud Build v1.1
+name: NovaBridge iOS Build v1.1.4
 
 on:
   workflow_dispatch:
@@ -7,260 +7,205 @@ on:
 
 jobs:
   ios-build:
-    runs-on: macos-latest
+    runs-on: macos-14
 
     env:
       BUILD_ID: ${{ github.event.client_payload.build_id }}
       ZIP_URL: ${{ github.event.client_payload.zip_url }}
       CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
-
-      # IMPORTANT: this must be a GitHub *SECRET* (Settings → Secrets and variables → Actions)
       CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
 
     steps:
-      - name: 🧪 Validate payload + secrets
-        shell: bash
+      # ----------------------------
+      # 1️⃣ Validate payload
+      # ----------------------------
+      - name: Validate payload
         run: |
-          set -euo pipefail
+          set -e
           echo "➡ BUILD_ID=$BUILD_ID"
           echo "➡ ZIP_URL=$ZIP_URL"
           echo "➡ CALLBACK_URL=$CALLBACK_URL"
-          if [ -z "${BUILD_ID:-}" ]; then echo "❌ BUILD_ID missing"; exit 1; fi
-          if [ -z "${ZIP_URL:-}" ]; then echo "❌ ZIP_URL missing"; exit 1; fi
-          if [ -z "${CALLBACK_URL:-}" ]; then echo "❌ CALLBACK_URL missing"; exit 1; fi
-          if [ -z "${CALLBACK_TOKEN:-}" ]; then echo "❌ CALLBACK_TOKEN missing (GitHub Actions Secret)"; exit 1; fi
-          echo "➡ CALLBACK_TOKEN_LENGTH=${#CALLBACK_TOKEN}"
 
-      - name: 📣 Callback helper (live steps)
-        shell: bash
+          if [ -z "$BUILD_ID" ] || [ -z "$ZIP_URL" ] || [ -z "$CALLBACK_URL" ]; then
+            echo "❌ Missing required payload values"
+            exit 1
+          fi
+
+      # ----------------------------
+      # 2️⃣ Download ZIP from Worker
+      # ----------------------------
+      - name: Download iOS ZIP
         run: |
-          set -euo pipefail
-          cat > cb.sh <<'EOF'
-          cb() {
-            local payload="$1"
-            echo "➡ cb payload: $payload"
-            # --fail-with-body makes 401 show and fail fast
-            curl --fail-with-body -sS -X POST "$CALLBACK_URL" \
-              -H "Content-Type: application/json" \
-              -H "x-novabridge-token: $CALLBACK_TOKEN" \
-              --data "$payload"
-            echo ""
+          set -e
+          curl -L "$ZIP_URL" -o ios.zip
+          unzip ios.zip -d work
+
+      # ----------------------------
+      # 3️⃣ Locate iOS project folder
+      # ----------------------------
+      - name: Locate iOS project
+        run: |
+          set -e
+          echo "📁 Contents of work/ios:"
+          ls work/ios
+
+          IOS_DIR=$(find work/ios -maxdepth 1 -type d -name "*-iOS" | head -n 1)
+          if [ -z "$IOS_DIR" ]; then
+            echo "❌ iOS project directory not found"
+            exit 1
+          fi
+
+          echo "IOS_DIR=$IOS_DIR" >> $GITHUB_ENV
+
+      # ----------------------------
+      # 4️⃣ Install XcodeGen
+      # ----------------------------
+      - name: Install XcodeGen
+        run: |
+          set -e
+          brew install xcodegen
+
+      # ----------------------------
+      # 5️⃣ Generate Xcode project
+      # ----------------------------
+      - name: Generate Xcode project
+        run: |
+          set -e
+          cd "$IOS_DIR"
+
+          if [ ! -f project.yml ]; then
+            echo "❌ project.yml not found"
+            exit 1
+          fi
+
+          xcodegen
+
+      # ----------------------------
+      # 6️⃣ Generate AppIcon.appiconset
+      # ----------------------------
+      - name: Generate App Icons
+        run: |
+          set -e
+          cd "$IOS_DIR"
+
+          ICON_SRC="AppIcon-1024.png"
+          ICONSET="App/Assets.xcassets/AppIcon.appiconset"
+
+          if [ ! -f "$ICON_SRC" ]; then
+            echo "❌ AppIcon-1024.png missing"
+            exit 1
+          fi
+
+          mkdir -p "$ICONSET"
+
+          cat > "$ICONSET/Contents.json" <<EOF
+          {
+            "images": [
+              { "idiom": "ios-marketing", "size": "1024x1024", "scale": "1x", "filename": "AppIcon-1024.png" }
+            ],
+            "info": { "version": 1, "author": "xcode" }
           }
           EOF
-          chmod +x cb.sh
 
-      - name: 📥 Download iOS project ZIP (Step 3 active)
-        shell: bash
+          cp "$ICON_SRC" "$ICONSET/AppIcon-1024.png"
+
+      # ----------------------------
+      # 7️⃣ Detect Xcode project & scheme
+      # ----------------------------
+      - name: Detect scheme
         run: |
-          set -euo pipefail
-          source ./cb.sh
-          cb "{\"build_id\":\"$BUILD_ID\",\"step\":3,\"step_state\":\"active\",\"log\":\"iOS: 📥 Downloading iOS project files\"}"
-          curl -L --fail-with-body -o ios.zip "$ZIP_URL"
-          mkdir -p work
-          unzip -q ios.zip -d work
-          echo "📁 Listing work directory:"
-          find work -maxdepth 4 -type f -print
+          set -e
+          cd "$IOS_DIR"
 
-      - name: 🔧 Install XcodeGen
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! command -v xcodegen >/dev/null 2>&1; then
-            brew update
-            brew install xcodegen
-          fi
-          xcodegen --version
-
-      - name: 🧩 Generate Xcode project (Step 4)
-        shell: bash
-        run: |
-          set -euo pipefail
-          source ./cb.sh
-          cb "{\"build_id\":\"$BUILD_ID\",\"step\":4,\"step_state\":\"active\",\"log\":\"iOS: 🧩 Generating Xcode project\"}"
-
-          # Find project.yml
-          PROJECT_YML="$(find work -name project.yml | head -n 1 || true)"
-          if [ -z "$PROJECT_YML" ]; then
-            echo "❌ project.yml not found"
-            find work -maxdepth 4 -type f -print
-            cb "{\"build_id\":\"$BUILD_ID\",\"step\":4,\"step_state\":\"failed\",\"log\":\"iOS: ❌ project.yml not found\",\"status\":\"failed\",\"error\":\"project.yml not found\"}"
-            exit 1
-          fi
-
-          IOS_DIR="$(dirname "$PROJECT_YML")"
-          echo "📂 IOS_DIR=$IOS_DIR"
-
-          pushd "$IOS_DIR" >/dev/null
-          xcodegen generate
-          popd >/dev/null
-
-          cb "{\"build_id\":\"$BUILD_ID\",\"step\":4,\"step_state\":\"done\",\"log\":\"iOS: ✅ Xcode project generated\"}"
-
-      - name: 📌 Locate Xcode project + scheme
-        shell: bash
-        run: |
-          set -euo pipefail
-          source ./cb.sh
-
-          XCODEPROJ="$(find work -name "*.xcodeproj" | head -n 1 || true)"
+          XCODEPROJ=$(ls *.xcodeproj | head -n 1)
           if [ -z "$XCODEPROJ" ]; then
-            echo "❌ No Xcode project found"
-            find work -maxdepth 6 -type f -print
-            cb "{\"build_id\":\"$BUILD_ID\",\"step\":4,\"step_state\":\"failed\",\"log\":\"iOS: ❌ No .xcodeproj found\",\"status\":\"failed\",\"error\":\"No Xcode project found\"}"
+            echo "❌ No .xcodeproj found"
             exit 1
           fi
-          echo "📦 XCODEPROJ=$XCODEPROJ"
 
-          IOS_DIR="$(dirname "$XCODEPROJ")"
-          echo "📂 IOS_DIR=$IOS_DIR"
+          SCHEME=$(xcodebuild -list -project "$XCODEPROJ" \
+            | awk '/Schemes:/ {getline; print $1}')
 
-          echo "🔍 Listing schemes..."
-          LIST_OUTPUT="$(xcodebuild -list -project "$XCODEPROJ" || true)"
-          echo "$LIST_OUTPUT"
-
-          # Robust scheme detection:
-          # - get lines AFTER "Schemes:" and pick first non-empty trimmed line
-          SCHEME="$(printf "%s\n" "$LIST_OUTPUT" | python3 - <<'PY'
-import sys, re
-txt=sys.stdin.read().splitlines()
-in_schemes=False
-schemes=[]
-for line in txt:
-    if re.match(r'^\s*Schemes:\s*$', line):
-        in_schemes=True
-        continue
-    if in_schemes:
-        if line.strip()=="":
-            continue
-        # scheme lines are indented names
-        schemes.append(line.strip())
-        # stop after first scheme to keep deterministic
-        break
-print(schemes[0] if schemes else "")
-PY
-)"
           if [ -z "$SCHEME" ]; then
             echo "❌ No scheme found"
-            cb "{\"build_id\":\"$BUILD_ID\",\"step\":4,\"step_state\":\"failed\",\"log\":\"iOS: ❌ No scheme found\",\"status\":\"failed\",\"error\":\"No scheme found\"}"
             exit 1
           fi
 
-          echo "🎯 SCHEME=$SCHEME"
-          echo "IOS_DIR=$IOS_DIR" >> $GITHUB_ENV
           echo "XCODEPROJ=$XCODEPROJ" >> $GITHUB_ENV
           echo "SCHEME=$SCHEME" >> $GITHUB_ENV
 
-      - name: 📱 Queued on macOS Runner (Step 5)
-        shell: bash
+      # ----------------------------
+      # 8️⃣ Build iOS app (no signing)
+      # ----------------------------
+      - name: Build iOS app
         run: |
-          set -euo pipefail
-          source ./cb.sh
-          cb "{\"build_id\":\"$BUILD_ID\",\"step\":5,\"step_state\":\"active\",\"log\":\"iOS: 📱 Queued on macOS runner\"}"
-          cb "{\"build_id\":\"$BUILD_ID\",\"step\":5,\"step_state\":\"done\",\"log\":\"iOS: ✅ Runner acquired\"}"
+          set -e
+          cd "$IOS_DIR"
 
-      - name: 🔨 Build with Xcode (Step 6)
-        shell: bash
-        run: |
-          set -euo pipefail
-          source ./cb.sh
-          cb "{\"build_id\":\"$BUILD_ID\",\"step\":6,\"step_state\":\"active\",\"log\":\"iOS: 🔨 Building with Xcode\"}"
-
-          pushd "$IOS_DIR" >/dev/null
-
-          # Build (no signing) — produces .app in DerivedData
-          set +e
           xcodebuild \
             -project "$XCODEPROJ" \
             -scheme "$SCHEME" \
             -configuration Release \
-            -destination 'generic/platform=iOS' \
+            -destination generic/platform=iOS \
             CODE_SIGNING_ALLOWED=NO \
-            build | tee xcodebuild.log
-          EXIT_CODE=${PIPESTATUS[0]}
+            build
+
+      # ----------------------------
+      # 9️⃣ Package build artifact
+      # ----------------------------
+      - name: Package iOS build
+        run: |
           set -e
+          cd "$IOS_DIR"
 
-          popd >/dev/null
-
-          if [ "$EXIT_CODE" -ne 0 ]; then
-            echo "❌ xcodebuild failed with $EXIT_CODE"
-            # Upload xcodebuild.log to GH artifacts too (nice for debugging)
-            cb "{\"build_id\":\"$BUILD_ID\",\"step\":6,\"step_state\":\"failed\",\"log\":\"iOS: ❌ xcodebuild failed\",\"status\":\"failed\",\"error\":\"xcodebuild failed (exit $EXIT_CODE)\"}"
+          APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -type d -name "*.app" | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "❌ Built .app not found"
             exit 1
           fi
 
-          cb "{\"build_id\":\"$BUILD_ID\",\"step\":6,\"step_state\":\"done\",\"log\":\"iOS: ✅ Build succeeded\"}"
+          mkdir -p artifact
+          cp -R "$APP_PATH" artifact/
 
-      - name: 📦 Package iOS build artifact (Step 7)
-        shell: bash
+          cd artifact
+          zip -r ios-build.zip .
+
+      # ----------------------------
+      # 🔟 Callback success + artifact
+      # ----------------------------
+      - name: Callback success
         run: |
-          set -euo pipefail
-          source ./cb.sh
-          cb "{\"build_id\":\"$BUILD_ID\",\"step\":7,\"step_state\":\"active\",\"log\":\"iOS: 📦 Packaging iOS build artifacts\"}"
+          set -e
+          cd "$IOS_DIR/artifact"
 
-          mkdir -p out
+          B64=$(base64 ios-build.zip)
 
-          # Collect useful outputs:
-          # - xcodebuild.log
-          # - generated project folder (so user can open)
-          # - any .app built (if found)
-          cp "$IOS_DIR/xcodebuild.log" out/xcodebuild.log || true
+          curl -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-novabridge-token: $CALLBACK_TOKEN" \
+            -d "{
+              \"build_id\": \"$BUILD_ID\",
+              \"status\": \"success\",
+              \"step\": 8,
+              \"step_state\": \"done\",
+              \"artifact_key\": \"ios/artifacts/$BUILD_ID.zip\",
+              \"artifact_blob_b64\": \"$B64\",
+              \"log\": \"✅ iOS build completed successfully\"
+            }"
 
-          # Try to find built .app
-          APP_PATH="$(find ~/Library/Developer/Xcode/DerivedData -type d -name "*.app" | head -n 1 || true)"
-          if [ -n "$APP_PATH" ]; then
-            echo "✅ Found app: $APP_PATH"
-            ditto "$APP_PATH" "out/App.app"
-          else
-            echo "⚠️ No .app found in DerivedData (still packaging project + logs)"
-          fi
-
-          # Include the Xcode project directory
-          ditto "$IOS_DIR" "out/Project"
-
-          # Zip artifact
-          ARTIFACT_ZIP="ios-${BUILD_ID}.zip"
-          (cd out && zip -qr "../$ARTIFACT_ZIP" .)
-
-          echo "ARTIFACT_ZIP=$ARTIFACT_ZIP" >> $GITHUB_ENV
-          echo "ARTIFACT_KEY=ios/artifacts/${BUILD_ID}.zip" >> $GITHUB_ENV
-
-          cb "{\"build_id\":\"$BUILD_ID\",\"step\":7,\"step_state\":\"done\",\"log\":\"iOS: ✅ Artifact packaged\"}"
-
-      - name: ☁️ Upload artifact to iOS Worker R2
-        shell: bash
+      # ----------------------------
+      # ❌ Failure callback
+      # ----------------------------
+      - name: Callback failure
+        if: failure()
         run: |
-          set -euo pipefail
-          source ./cb.sh
-
-          # Upload via Worker (PUT to R2 not possible directly from Actions without keys)
-          # We upload by POSTing to a Worker route that stores it in R2.
-          # BUT your Worker currently supports: /artifact-ios/:id (GET) and stores via R2 in callback.
-          # So: we base64 the zip and send to callback as artifact_blob_b64 (Worker will store).
-          echo "Uploading artifact via callback…"
-
-          B64="$(python3 - <<PY
-import base64
-data=open("${ARTIFACT_ZIP}","rb").read()
-print(base64.b64encode(data).decode("ascii"))
-PY
-)"
-
-          cb "{\"build_id\":\"$BUILD_ID\",\"log\":\"iOS: ☁️ Uploading artifact to Worker R2\",\"level\":\"info\"}"
-
-          # NOTE: Worker must implement saving artifact_blob_b64 to R2 at ios/artifacts/{buildId}.zip
-          cb "{\"build_id\":\"$BUILD_ID\",\"status\":\"success\",\"artifact_key\":\"$ARTIFACT_KEY\",\"artifact_blob_b64\":\"$B64\",\"log\":\"iOS: ✅ Uploaded artifact\"}"
-
-      - name: ✅ Complete (Step 8) — terminal callback
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          source ./cb.sh
-
-          # If previous steps failed, send failed terminal callback
-          if [ "${{ job.status }}" != "success" ]; then
-            cb "{\"build_id\":\"$BUILD_ID\",\"status\":\"failed\",\"log\":\"iOS: ❌ Build failed in GitHub Actions\",\"level\":\"error\"}" || true
-            exit 0
-          fi
-
-          cb "{\"build_id\":\"$BUILD_ID\",\"step\":8,\"step_state\":\"done\",\"log\":\"iOS: ✅ Complete\",\"status\":\"success\"}"
+          curl -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-novabridge-token: $CALLBACK_TOKEN" \
+            -d "{
+              \"build_id\": \"$BUILD_ID\",
+              \"status\": \"failed\",
+              \"step\": 6,
+              \"step_state\": \"failed\",
+              \"error\": \"iOS build failed\"
+            }"
