@@ -38,7 +38,12 @@ jobs:
         run: |
           set -e
           curl -L "$ZIP_URL" -o ios.zip
-          unzip ios.zip -d work
+          unzip -o ios.zip -d work
+
+          echo "📁 Listing work/ios:"
+          ls -la work/ios || true
+          echo "📁 Recursive listing (first 120 lines):"
+          (find work/ios -maxdepth 4 -print | head -n 120) || true
 
           curl -s -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
@@ -53,22 +58,30 @@ jobs:
           brew install xcodegen
 
       # -------------------------
-      # 3️⃣ Locate iOS project directory
+      # 3️⃣ Locate iOS project directory (supports both layouts)
       # -------------------------
       - name: Locate iOS project directory
         run: |
           set -e
 
-          IOS_DIR=$(find work/ios -maxdepth 1 -type d -name "*-iOS" | head -n 1)
+          # Prefer: a directory that contains project.yml (XcodeGen)
+          PROJECT_YML=$(find work/ios -maxdepth 4 -name "project.yml" | head -n 1 || true)
 
-          if [ -z "$IOS_DIR" ]; then
-            echo "❌ No *-iOS directory found under work/ios"
-            ls -R work/ios
+          if [ -z "$PROJECT_YML" ]; then
+            echo "❌ project.yml not found anywhere under work/ios"
+            echo "📁 work/ios contents:"
+            ls -la work/ios || true
+            echo "📁 Recursive listing (first 200 lines):"
+            (find work/ios -maxdepth 4 -print | head -n 200) || true
             exit 1
           fi
 
+          IOS_DIR=$(dirname "$PROJECT_YML")
+
+          echo "✅ Found project.yml at: $PROJECT_YML"
+          echo "📁 Using IOS_DIR: $IOS_DIR"
+
           echo "IOS_DIR=$IOS_DIR" >> $GITHUB_ENV
-          echo "📁 Using iOS directory: $IOS_DIR"
 
       # -------------------------
       # 4️⃣ Generate Xcode project
@@ -91,17 +104,24 @@ jobs:
         run: |
           set -e
 
-          XCODEPROJ=$(find "$IOS_DIR" -name "*.xcodeproj" | head -n 1)
+          XCODEPROJ=$(find "$IOS_DIR" -maxdepth 2 -name "*.xcodeproj" | head -n 1 || true)
           if [ -z "$XCODEPROJ" ]; then
-            echo "❌ No Xcode project found"
+            echo "❌ No .xcodeproj found under IOS_DIR"
+            echo "📁 IOS_DIR listing:"
+            ls -la "$IOS_DIR" || true
             exit 1
           fi
 
-          SCHEME=$(xcodebuild -list -project "$XCODEPROJ" | awk '/Schemes:/ {getline; print $1}')
+          # Capture the first scheme line after "Schemes:" (trim whitespace)
+          SCHEME=$(xcodebuild -list -project "$XCODEPROJ" | sed -n '/Schemes:/,$p' | sed -n '2p' | xargs || true)
           if [ -z "$SCHEME" ]; then
             echo "❌ No scheme found"
+            xcodebuild -list -project "$XCODEPROJ" || true
             exit 1
           fi
+
+          echo "✅ XCODEPROJ=$XCODEPROJ"
+          echo "✅ SCHEME=$SCHEME"
 
           echo "XCODEPROJ=$XCODEPROJ" >> $GITHUB_ENV
           echo "SCHEME=$SCHEME" >> $GITHUB_ENV
