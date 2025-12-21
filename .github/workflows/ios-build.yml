@@ -1,331 +1,171 @@
-name: NovaBridge iOS Build (Generated Project + Signed IPA)
+name: NovaBridge Android Cloud Build v16.9
 
 on:
+  workflow_dispatch:
   repository_dispatch:
-    types: [novabridge_ios_build_v1]
+    types: [novabridge_android_build_v16_9]
 
 jobs:
-  ios-build:
-    runs-on: macos-latest
-    timeout-minutes: 45
+  android-build:
+    runs-on: ubuntu-latest
 
     env:
       BUILD_ID: ${{ github.event.client_payload.build_id }}
       ZIP_URL: ${{ github.event.client_payload.zip_url }}
       CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
-      CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
-
-      # Phase 2.1 Signing Secrets (repo secrets)
-      IOS_P12_BASE64: ${{ secrets.IOS_P12_BASE64 }}
-      IOS_P12_PASSWORD: ${{ secrets.IOS_P12_PASSWORD }}
-      IOS_MOBILEPROVISION_BASE64: ${{ secrets.IOS_MOBILEPROVISION_BASE64 }}
-      IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
-      IOS_EXPORT_METHOD: ${{ secrets.IOS_EXPORT_METHOD }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
 
     steps:
-      # -------------------------
-      # 0️⃣ Validate payload + signing secrets
-      # -------------------------
-      - name: Validate payload + signing inputs
+      - name: 🧩 Checkout repo
+        uses: actions/checkout@v4
+
+      - name: 🧪 Print incoming payload
+        run: |
+          echo "BUILD_ID=${BUILD_ID}"
+          echo "ZIP_URL=${ZIP_URL}"
+          echo "CALLBACK_URL=${CALLBACK_URL}"
+          echo "HOME=${HOME}"
+
+      - name: ☕ Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: 🧱 Setup Gradle 8.2.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.2.1"
+
+      # ✅ FIX: ensure the keystore exists (Gradle expects /home/runner/.android/debug.keystore)
+      - name: 🔐 Ensure Android debug.keystore exists (required for signing)
         run: |
           set -e
-          echo "➡ BUILD_ID=$BUILD_ID"
-          echo "➡ ZIP_URL=$ZIP_URL"
-          echo "➡ CALLBACK_URL=$CALLBACK_URL"
+          echo "JAVA_HOME=$JAVA_HOME"
+          mkdir -p "$HOME/.android"
 
-          if [ -z "$BUILD_ID" ] || [ -z "$ZIP_URL" ] || [ -z "$CALLBACK_URL" ]; then
-            echo "❌ Missing required payload values"
+          if [ ! -f "$HOME/.android/debug.keystore" ]; then
+            echo "Creating $HOME/.android/debug.keystore..."
+            "$JAVA_HOME/bin/keytool" -genkeypair \
+              -keystore "$HOME/.android/debug.keystore" \
+              -storepass android \
+              -keypass android \
+              -alias androiddebugkey \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          else
+            echo "debug.keystore already exists."
+          fi
+
+          echo "Listing $HOME/.android:"
+          ls -la "$HOME/.android"
+          test -f "$HOME/.android/debug.keystore"
+          echo "✅ debug.keystore present."
+
+      - name: 📥 Download ZIP & extract native project
+        run: |
+          set -e
+          echo "➡️ Downloading native ZIP: $ZIP_URL"
+          curl -L "$ZIP_URL" -o native.zip
+
+          mkdir -p build
+          unzip -q native.zip -d build
+
+          echo "📂 Listing extracted content:"
+          ls -R build
+
+      # ------------------------------
+      # MAIN BUILD STEP (runs inside build/)
+      # ------------------------------
+      - name: 🏗 Build APK (Release → Debug fallback)
+        working-directory: build
+        run: |
+          set -e
+          echo "📂 Build directory:"
+          ls -la
+
+          if [ -x "./gradlew" ]; then
+            echo "✔ Using Gradle Wrapper"
+            ./gradlew assembleRelease --warning-mode all || ./gradlew assembleDebug --warning-mode all
+          else
+            echo "⚠️ No gradlew found, using system Gradle"
+            gradle assembleRelease --warning-mode all || gradle assembleDebug --warning-mode all
+          fi
+
+      - name: 🔍 Locate APK
+        id: find_apk
+        working-directory: build
+        run: |
+          set -e
+          echo "Searching for APKs inside app/build/outputs..."
+
+          APK_PATH=$(find app/build/outputs/apk -type f -name "*.apk" | grep -vi "unsigned" | head -n 1 || true)
+          if [ -z "$APK_PATH" ]; then
+            APK_PATH=$(find app/build/outputs/apk -type f -name "*.apk" | head -n 1 || true)
+          fi
+
+          if [ -z "$APK_PATH" ]; then
+            echo "❌ No APK found"
+            find app/build -type f | sed 's/^/  /'
             exit 1
           fi
 
-          # Signing inputs required for IPA export
-          if [ -z "$IOS_P12_BASE64" ] || [ -z "$IOS_P12_PASSWORD" ] || [ -z "$IOS_MOBILEPROVISION_BASE64" ] || [ -z "$IOS_TEAM_ID" ] || [ -z "$IOS_EXPORT_METHOD" ]; then
-            echo "❌ Missing iOS signing secrets (IOS_P12_BASE64/IOS_P12_PASSWORD/IOS_MOBILEPROVISION_BASE64/IOS_TEAM_ID/IOS_EXPORT_METHOD)"
-            exit 1
-          fi
+          echo "✔ Found APK: $APK_PATH"
+          echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
 
-          echo "✅ Signing inputs present (lengths only):"
-          echo "  IOS_P12_BASE64_LEN=${#IOS_P12_BASE64}"
-          echo "  IOS_MOBILEPROVISION_BASE64_LEN=${#IOS_MOBILEPROVISION_BASE64}"
-          echo "  IOS_TEAM_ID=$IOS_TEAM_ID"
-          echo "  IOS_EXPORT_METHOD=$IOS_EXPORT_METHOD"
-
-      # -------------------------
-      # 1️⃣ Download ZIP
-      # -------------------------
-      - name: Download iOS ZIP
+      - name: ☁️ Upload APK to R2
+        id: upload_r2
         run: |
           set -e
-          curl -L "$ZIP_URL" -o ios.zip
-          unzip -o ios.zip -d work
 
-          echo "📁 Listing work/ios:"
-          ls -la work/ios || true
-          echo "📁 Recursive listing (first 120 lines):"
-          (find work/ios -maxdepth 4 -print | head -n 120) || true
+          APK="build/${{ steps.find_apk.outputs.apk_path }}"
+          DEST_PATH="apks/${BUILD_ID}.apk"
 
-          curl -s -X POST "$CALLBACK_URL" \
+          echo "Uploading APK to R2:"
+          echo "➡️ Source: $APK"
+          echo "➡️ Destination: s3://${R2_BUCKET}/${DEST_PATH}"
+
+          AWS_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID}" \
+          AWS_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY}" \
+          aws s3 cp "$APK" "s3://${R2_BUCKET}/${DEST_PATH}" \
+            --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
+            --region auto
+
+          # Public URL should be served via your Worker route:
+          APK_URL="https://novabridge-build-worker.novabridge.workers.dev/apk/${BUILD_ID}"
+          echo "apk_url=$APK_URL" >> $GITHUB_OUTPUT
+          echo "✅ APK uploaded. Public URL via Worker: $APK_URL"
+
+      - name: ✅ Notify Worker – success
+        if: success() && env.CALLBACK_URL != ''
+        run: |
+          set -e
+          APK_URL="${{ steps.upload_r2.outputs.apk_url }}"
+          echo "🔔 Notifying Worker of success. BUILD_ID=${BUILD_ID}"
+          echo "🔗 APK_URL=${APK_URL}"
+
+          curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
-            -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 3, \"step_state\": \"done\", \"log\": \"iOS: 📥 Project ZIP downloaded\" }"
+            -d "$(jq -n \
+                --arg id "$BUILD_ID" \
+                --arg status "success" \
+                --arg art "$APK_URL" \
+                --arg msg "Android build completed successfully" \
+                '{build_id:$id, status:$status, artifact_url:$art, message:$msg}')"
 
-      # -------------------------
-      # 2️⃣ Install xcodegen
-      # -------------------------
-      - name: Install xcodegen
+      - name: ❌ Notify Worker – failure
+        if: failure() && env.CALLBACK_URL != ''
         run: |
-          brew install xcodegen
-
-      # -------------------------
-      # 3️⃣ Locate iOS project directory
-      # -------------------------
-      - name: Locate iOS project directory
-        run: |
-          set -e
-
-          PROJECT_YML=$(find work/ios -maxdepth 4 -name "project.yml" | head -n 1 || true)
-
-          if [ -z "$PROJECT_YML" ]; then
-            echo "❌ project.yml not found anywhere under work/ios"
-            echo "📁 work/ios contents:"
-            ls -la work/ios || true
-            echo "📁 Recursive listing (first 200 lines):"
-            (find work/ios -maxdepth 4 -print | head -n 200) || true
-            exit 1
-          fi
-
-          IOS_DIR=$(dirname "$PROJECT_YML")
-
-          echo "✅ Found project.yml at: $PROJECT_YML"
-          echo "📁 Using IOS_DIR: $IOS_DIR"
-
-          echo "IOS_DIR=$IOS_DIR" >> $GITHUB_ENV
-
-      # -------------------------
-      # 4️⃣ Generate Xcode project
-      # -------------------------
-      - name: Generate Xcode project
-        run: |
-          set -e
-          cd "$IOS_DIR"
-          xcodegen generate
-
-          curl -s -X POST "$CALLBACK_URL" \
+          echo "🔔 Notifying Worker of FAILURE. BUILD_ID=${BUILD_ID}"
+          curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
-            -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 4, \"step_state\": \"done\", \"log\": \"iOS: 🏗 Xcode project generated\" }"
-
-      # -------------------------
-      # 5️⃣ Locate project + scheme + bundle id
-      # -------------------------
-      - name: Locate Xcode project and scheme + bundle id
-        run: |
-          set -e
-
-          XCODEPROJ=$(find "$IOS_DIR" -maxdepth 2 -name "*.xcodeproj" | head -n 1 || true)
-          if [ -z "$XCODEPROJ" ]; then
-            echo "❌ No .xcodeproj found under IOS_DIR"
-            echo "📁 IOS_DIR listing:"
-            ls -la "$IOS_DIR" || true
-            exit 1
-          fi
-
-          SCHEME=$(xcodebuild -list -project "$XCODEPROJ" | sed -n '/Schemes:/,$p' | sed -n '2p' | xargs || true)
-          if [ -z "$SCHEME" ]; then
-            echo "❌ No scheme found"
-            xcodebuild -list -project "$XCODEPROJ" || true
-            exit 1
-          fi
-
-          # Read bundle id from Info.plist
-          INFO_PLIST="$IOS_DIR/App/Info.plist"
-          if [ ! -f "$INFO_PLIST" ]; then
-            echo "❌ Info.plist not found at $INFO_PLIST"
-            ls -la "$IOS_DIR/App" || true
-            exit 1
-          fi
-
-          BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$INFO_PLIST" | xargs || true)
-          if [ -z "$BUNDLE_ID" ]; then
-            echo "❌ Could not read CFBundleIdentifier from Info.plist"
-            exit 1
-          fi
-
-          echo "✅ XCODEPROJ=$XCODEPROJ"
-          echo "✅ SCHEME=$SCHEME"
-          echo "✅ BUNDLE_ID=$BUNDLE_ID"
-
-          echo "XCODEPROJ=$XCODEPROJ" >> $GITHUB_ENV
-          echo "SCHEME=$SCHEME" >> $GITHUB_ENV
-          echo "BUNDLE_ID=$BUNDLE_ID" >> $GITHUB_ENV
-
-          curl -s -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 5, \"step_state\": \"done\", \"log\": \"iOS: 📱 Queued on macOS runner (scheme: $SCHEME)\" }"
-
-      # -------------------------
-      # 6️⃣ Setup signing (keychain + provisioning profile)
-      # -------------------------
-      - name: Setup iOS signing
-        run: |
-          set -e
-
-          echo "🔐 Setting up temporary keychain..."
-          KEYCHAIN_PATH="$RUNNER_TEMP/novabridge-signing.keychain-db"
-          KEYCHAIN_PASSWORD="$(uuidgen)"
-
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
-          security default-keychain -s "$KEYCHAIN_PATH"
-
-          echo "📜 Importing P12 certificate..."
-          echo "$IOS_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN_PATH" -P "$IOS_P12_PASSWORD" -A -T /usr/bin/codesign -T /usr/bin/security
-
-          # Allow codesign to access the key without UI prompt
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-
-          echo "📦 Installing provisioning profile..."
-          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
-          echo "$IOS_MOBILEPROVISION_BASE64" | base64 --decode > "$RUNNER_TEMP/profile.mobileprovision"
-
-          # Extract UUID and Name from the provisioning profile
-          security cms -D -i "$RUNNER_TEMP/profile.mobileprovision" > "$RUNNER_TEMP/profile.plist"
-
-          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c "Print :UUID" "$RUNNER_TEMP/profile.plist" | xargs || true)
-          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c "Print :Name" "$RUNNER_TEMP/profile.plist" | xargs || true)
-
-          if [ -z "$PROFILE_UUID" ] || [ -z "$PROFILE_NAME" ]; then
-            echo "❌ Could not parse provisioning profile UUID/Name"
-            exit 1
-          fi
-
-          cp "$RUNNER_TEMP/profile.mobileprovision" "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
-
-          echo "✅ Installed provisioning profile:"
-          echo "  UUID=$PROFILE_UUID"
-          echo "  NAME=$PROFILE_NAME"
-
-          echo "PROFILE_UUID=$PROFILE_UUID" >> $GITHUB_ENV
-          echo "PROFILE_NAME=$PROFILE_NAME" >> $GITHUB_ENV
-          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> $GITHUB_ENV
-          echo "KEYCHAIN_PASSWORD=$KEYCHAIN_PASSWORD" >> $GITHUB_ENV
-
-          curl -s -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 6, \"step_state\": \"active\", \"log\": \"iOS: 🔐 Signing assets installed (team: $IOS_TEAM_ID)\" }"
-
-      # -------------------------
-      # 7️⃣ Archive + Export IPA
-      # -------------------------
-      - name: Archive and export IPA
-        run: |
-          set -e
-          cd "$IOS_DIR"
-
-          echo "🏗 Archiving (signed)..."
-          ARCHIVE_PATH="$RUNNER_TEMP/${SCHEME}.xcarchive"
-          EXPORT_DIR="$RUNNER_TEMP/export"
-          mkdir -p "$EXPORT_DIR"
-
-          xcodebuild \
-            -project "$XCODEPROJ" \
-            -scheme "$SCHEME" \
-            -configuration Release \
-            -archivePath "$ARCHIVE_PATH" \
-            -destination generic/platform=iOS \
-            DEVELOPMENT_TEAM="$IOS_TEAM_ID" \
-            CODE_SIGN_STYLE=Manual \
-            clean archive
-
-          echo "🧾 Creating ExportOptions.plist..."
-          cat > "$RUNNER_TEMP/ExportOptions.plist" <<EOF
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>method</key>
-            <string>${IOS_EXPORT_METHOD}</string>
-            <key>signingStyle</key>
-            <string>manual</string>
-            <key>teamID</key>
-            <string>${IOS_TEAM_ID}</string>
-            <key>provisioningProfiles</key>
-            <dict>
-              <key>${BUNDLE_ID}</key>
-              <string>${PROFILE_NAME}</string>
-            </dict>
-          </dict>
-          </plist>
-          EOF
-
-          echo "📦 Exporting IPA..."
-          xcodebuild -exportArchive \
-            -archivePath "$ARCHIVE_PATH" \
-            -exportPath "$EXPORT_DIR" \
-            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist"
-
-          IPA_PATH=$(find "$EXPORT_DIR" -maxdepth 1 -name "*.ipa" | head -n 1 || true)
-          if [ -z "$IPA_PATH" ]; then
-            echo "❌ IPA not generated"
-            echo "📁 Export dir listing:"
-            ls -la "$EXPORT_DIR" || true
-            exit 1
-          fi
-
-          echo "✅ IPA generated at: $IPA_PATH"
-          echo "IPA_PATH=$IPA_PATH" >> $GITHUB_ENV
-
-          curl -s -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 7, \"step_state\": \"done\", \"log\": \"iOS: 📦 IPA exported (${IOS_EXPORT_METHOD})\" }"
-
-      # -------------------------
-      # 8️⃣ Package legacy artifact ZIP (kept) + upload both outputs + COMPLETE
-      # -------------------------
-      - name: Package iOS artifact (ZIP kept)
-        run: |
-          set -e
-          cd work
-          zip -r ios-artifact.zip .
-
-          curl -s -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 7, \"step_state\": \"done\", \"log\": \"iOS: 📦 iOS build packaged (legacy zip)\" }"
-
-      - name: Upload IPA + artifact ZIP to Worker and COMPLETE
-        run: |
-          set -e
-
-          # Upload legacy artifact ZIP (existing)
-          curl -X PUT \
-            --data-binary @work/ios-artifact.zip \
-            "https://novabridge-ios-build-worker.novabridge.workers.dev/upload-artifact-ios/$BUILD_ID"
-
-          # Upload IPA (new)
-          curl -X PUT \
-            --data-binary @"$IPA_PATH" \
-            "https://novabridge-ios-build-worker.novabridge.workers.dev/upload-ipa-ios/$BUILD_ID"
-
-          # Authoritative callback (terminal=true happens in worker here)
-          curl -s -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d "{ \"build_id\": \"$BUILD_ID\", \"status\": \"success\", \"artifact_key\": \"ios/artifacts/$BUILD_ID.zip\", \"ipa_key\": \"ios/ipas/$BUILD_ID.ipa\", \"log\": \"iOS: 🎉 Build complete (IPA ready)\" }"
-
-      # -------------------------
-      # ❌ Failure handler
-      # -------------------------
-      - name: Failure callback
-        if: failure()
-        run: |
-          curl -s -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d "{ \"build_id\": \"$BUILD_ID\", \"status\": \"failed\", \"log\": \"iOS: ❌ Build failed in GitHub Actions\" }"
+            -d "$(jq -n \
+                --arg id "$BUILD_ID" \
+                --arg status "error" \
+                --arg msg "Android build failed – check logs" \
+                '{build_id:$id, status:$status, artifact_url:null, message:$msg}')"
