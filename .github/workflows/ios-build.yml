@@ -1,171 +1,178 @@
-name: NovaBridge Android Cloud Build v16.9
+name: NovaBridge iOS Build (Generated Project)
 
 on:
-  workflow_dispatch:
   repository_dispatch:
-    types: [novabridge_android_build_v16_9]
+    types: [novabridge_ios_build_v1]
 
 jobs:
-  android-build:
-    runs-on: ubuntu-latest
+  ios-build:
+    runs-on: macos-latest
+    timeout-minutes: 45
 
     env:
       BUILD_ID: ${{ github.event.client_payload.build_id }}
       ZIP_URL: ${{ github.event.client_payload.zip_url }}
       CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
-      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      R2_BUCKET: ${{ secrets.R2_BUCKET }}
-      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
 
     steps:
-      - name: 🧩 Checkout repo
-        uses: actions/checkout@v4
-
-      - name: 🧪 Print incoming payload
-        run: |
-          echo "BUILD_ID=${BUILD_ID}"
-          echo "ZIP_URL=${ZIP_URL}"
-          echo "CALLBACK_URL=${CALLBACK_URL}"
-          echo "HOME=${HOME}"
-
-      - name: ☕ Setup Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: 🧱 Setup Gradle 8.2.1
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.2.1"
-
-      # ✅ FIX: ensure the keystore exists (Gradle expects /home/runner/.android/debug.keystore)
-      - name: 🔐 Ensure Android debug.keystore exists (required for signing)
+      # -------------------------
+      # 0️⃣ Validate payload
+      # -------------------------
+      - name: Validate payload
         run: |
           set -e
-          echo "JAVA_HOME=$JAVA_HOME"
-          mkdir -p "$HOME/.android"
+          echo "➡ BUILD_ID=$BUILD_ID"
+          echo "➡ ZIP_URL=$ZIP_URL"
+          echo "➡ CALLBACK_URL=$CALLBACK_URL"
 
-          if [ ! -f "$HOME/.android/debug.keystore" ]; then
-            echo "Creating $HOME/.android/debug.keystore..."
-            "$JAVA_HOME/bin/keytool" -genkeypair \
-              -keystore "$HOME/.android/debug.keystore" \
-              -storepass android \
-              -keypass android \
-              -alias androiddebugkey \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
-          else
-            echo "debug.keystore already exists."
-          fi
-
-          echo "Listing $HOME/.android:"
-          ls -la "$HOME/.android"
-          test -f "$HOME/.android/debug.keystore"
-          echo "✅ debug.keystore present."
-
-      - name: 📥 Download ZIP & extract native project
-        run: |
-          set -e
-          echo "➡️ Downloading native ZIP: $ZIP_URL"
-          curl -L "$ZIP_URL" -o native.zip
-
-          mkdir -p build
-          unzip -q native.zip -d build
-
-          echo "📂 Listing extracted content:"
-          ls -R build
-
-      # ------------------------------
-      # MAIN BUILD STEP (runs inside build/)
-      # ------------------------------
-      - name: 🏗 Build APK (Release → Debug fallback)
-        working-directory: build
-        run: |
-          set -e
-          echo "📂 Build directory:"
-          ls -la
-
-          if [ -x "./gradlew" ]; then
-            echo "✔ Using Gradle Wrapper"
-            ./gradlew assembleRelease --warning-mode all || ./gradlew assembleDebug --warning-mode all
-          else
-            echo "⚠️ No gradlew found, using system Gradle"
-            gradle assembleRelease --warning-mode all || gradle assembleDebug --warning-mode all
-          fi
-
-      - name: 🔍 Locate APK
-        id: find_apk
-        working-directory: build
-        run: |
-          set -e
-          echo "Searching for APKs inside app/build/outputs..."
-
-          APK_PATH=$(find app/build/outputs/apk -type f -name "*.apk" | grep -vi "unsigned" | head -n 1 || true)
-          if [ -z "$APK_PATH" ]; then
-            APK_PATH=$(find app/build/outputs/apk -type f -name "*.apk" | head -n 1 || true)
-          fi
-
-          if [ -z "$APK_PATH" ]; then
-            echo "❌ No APK found"
-            find app/build -type f | sed 's/^/  /'
+          if [ -z "$BUILD_ID" ] || [ -z "$ZIP_URL" ] || [ -z "$CALLBACK_URL" ]; then
+            echo "❌ Missing required payload values"
             exit 1
           fi
 
-          echo "✔ Found APK: $APK_PATH"
-          echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
+      # -------------------------
+      # 1️⃣ Download ZIP
+      # -------------------------
+      - name: Download iOS ZIP
+        run: |
+          set -e
+          curl -L "$ZIP_URL" -o ios.zip
+          unzip ios.zip -d work
 
-      - name: ☁️ Upload APK to R2
-        id: upload_r2
+          curl -s -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-novabridge-token: $CALLBACK_TOKEN" \
+            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 3, \"step_state\": \"done\", \"log\": \"iOS: 📥 Project ZIP downloaded\" }"
+
+      # -------------------------
+      # 2️⃣ Install xcodegen
+      # -------------------------
+      - name: Install xcodegen
+        run: |
+          brew install xcodegen
+
+      # -------------------------
+      # 3️⃣ Locate iOS project directory
+      # -------------------------
+      - name: Locate iOS project directory
         run: |
           set -e
 
-          APK="build/${{ steps.find_apk.outputs.apk_path }}"
-          DEST_PATH="apks/${BUILD_ID}.apk"
+          IOS_DIR=$(find work/ios -maxdepth 1 -type d -name "*-iOS" | head -n 1)
 
-          echo "Uploading APK to R2:"
-          echo "➡️ Source: $APK"
-          echo "➡️ Destination: s3://${R2_BUCKET}/${DEST_PATH}"
+          if [ -z "$IOS_DIR" ]; then
+            echo "❌ No *-iOS directory found under work/ios"
+            ls -R work/ios
+            exit 1
+          fi
 
-          AWS_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID}" \
-          AWS_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY}" \
-          aws s3 cp "$APK" "s3://${R2_BUCKET}/${DEST_PATH}" \
-            --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
-            --region auto
+          echo "IOS_DIR=$IOS_DIR" >> $GITHUB_ENV
+          echo "📁 Using iOS directory: $IOS_DIR"
 
-          # Public URL should be served via your Worker route:
-          APK_URL="https://novabridge-build-worker.novabridge.workers.dev/apk/${BUILD_ID}"
-          echo "apk_url=$APK_URL" >> $GITHUB_OUTPUT
-          echo "✅ APK uploaded. Public URL via Worker: $APK_URL"
-
-      - name: ✅ Notify Worker – success
-        if: success() && env.CALLBACK_URL != ''
+      # -------------------------
+      # 4️⃣ Generate Xcode project
+      # -------------------------
+      - name: Generate Xcode project
         run: |
           set -e
-          APK_URL="${{ steps.upload_r2.outputs.apk_url }}"
-          echo "🔔 Notifying Worker of success. BUILD_ID=${BUILD_ID}"
-          echo "🔗 APK_URL=${APK_URL}"
+          cd "$IOS_DIR"
+          xcodegen generate
 
-          curl -X POST "$CALLBACK_URL" \
+          curl -s -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
-            -d "$(jq -n \
-                --arg id "$BUILD_ID" \
-                --arg status "success" \
-                --arg art "$APK_URL" \
-                --arg msg "Android build completed successfully" \
-                '{build_id:$id, status:$status, artifact_url:$art, message:$msg}')"
+            -H "x-novabridge-token: $CALLBACK_TOKEN" \
+            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 4, \"step_state\": \"done\", \"log\": \"iOS: 🏗 Xcode project generated\" }"
 
-      - name: ❌ Notify Worker – failure
-        if: failure() && env.CALLBACK_URL != ''
+      # -------------------------
+      # 5️⃣ Locate project + scheme
+      # -------------------------
+      - name: Locate Xcode project and scheme
         run: |
-          echo "🔔 Notifying Worker of FAILURE. BUILD_ID=${BUILD_ID}"
-          curl -X POST "$CALLBACK_URL" \
+          set -e
+
+          XCODEPROJ=$(find "$IOS_DIR" -name "*.xcodeproj" | head -n 1)
+          if [ -z "$XCODEPROJ" ]; then
+            echo "❌ No Xcode project found"
+            exit 1
+          fi
+
+          SCHEME=$(xcodebuild -list -project "$XCODEPROJ" | awk '/Schemes:/ {getline; print $1}')
+          if [ -z "$SCHEME" ]; then
+            echo "❌ No scheme found"
+            exit 1
+          fi
+
+          echo "XCODEPROJ=$XCODEPROJ" >> $GITHUB_ENV
+          echo "SCHEME=$SCHEME" >> $GITHUB_ENV
+
+          curl -s -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
-            -d "$(jq -n \
-                --arg id "$BUILD_ID" \
-                --arg status "error" \
-                --arg msg "Android build failed – check logs" \
-                '{build_id:$id, status:$status, artifact_url:null, message:$msg}')"
+            -H "x-novabridge-token: $CALLBACK_TOKEN" \
+            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 5, \"step_state\": \"done\", \"log\": \"iOS: 📱 Queued on macOS runner (scheme: $SCHEME)\" }"
+
+      # -------------------------
+      # 6️⃣ Build with Xcode
+      # -------------------------
+      - name: Build iOS app
+        run: |
+          set -e
+
+          curl -s -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-novabridge-token: $CALLBACK_TOKEN" \
+            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 6, \"step_state\": \"active\", \"log\": \"iOS: 🔨 Building with Xcode\" }"
+
+          xcodebuild \
+            -project "$XCODEPROJ" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -destination generic/platform=iOS \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+          curl -s -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-novabridge-token: $CALLBACK_TOKEN" \
+            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 6, \"step_state\": \"done\", \"log\": \"iOS: ✅ Build completed\" }"
+
+      # -------------------------
+      # 7️⃣ Package artifact
+      # -------------------------
+      - name: Package iOS artifact
+        run: |
+          set -e
+          cd work
+          zip -r ios-artifact.zip .
+
+          curl -s -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-novabridge-token: $CALLBACK_TOKEN" \
+            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 7, \"step_state\": \"done\", \"log\": \"iOS: 📦 iOS build packaged\" }"
+
+      # -------------------------
+      # 8️⃣ Upload artifact + COMPLETE
+      # -------------------------
+      - name: Upload artifact to Worker
+        run: |
+          set -e
+
+          curl -X PUT \
+            --data-binary @work/ios-artifact.zip \
+            "https://novabridge-ios-build-worker.novabridge.workers.dev/upload-artifact-ios/$BUILD_ID"
+
+          curl -s -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-novabridge-token: $CALLBACK_TOKEN" \
+            -d "{ \"build_id\": \"$BUILD_ID\", \"status\": \"success\", \"artifact_key\": \"ios/artifacts/$BUILD_ID.zip\", \"log\": \"iOS: 🎉 Build complete\" }"
+
+      # -------------------------
+      # ❌ Failure handler
+      # -------------------------
+      - name: Failure callback
+        if: failure()
+        run: |
+          curl -s -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-novabridge-token: $CALLBACK_TOKEN" \
+            -d "{ \"build_id\": \"$BUILD_ID\", \"status\": \"failed\", \"log\": \"iOS: ❌ Build failed in GitHub Actions\" }"
