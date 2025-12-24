@@ -15,6 +15,11 @@ jobs:
       CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
       CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
 
+      # Optional IPA signing secrets (only used if build_ipa=true later)
+      IOS_P12_BASE64: ${{ secrets.IOS_P12_BASE64 }}
+      IOS_P12_PASSWORD: ${{ secrets.IOS_P12_PASSWORD }}
+      IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+
     steps:
       # -------------------------
       # 0️⃣ Validate payload
@@ -53,30 +58,12 @@ jobs:
           brew install xcodegen
 
       # -------------------------
-      # 3️⃣ Locate iOS project directory
-      # -------------------------
-      - name: Locate iOS project directory
-        run: |
-          set -e
-
-          IOS_DIR=$(find work/ios -maxdepth 1 -type d -name "*-iOS" | head -n 1)
-
-          if [ -z "$IOS_DIR" ]; then
-            echo "❌ No *-iOS directory found under work/ios"
-            ls -R work/ios
-            exit 1
-          fi
-
-          echo "IOS_DIR=$IOS_DIR" >> $GITHUB_ENV
-          echo "📁 Using iOS directory: $IOS_DIR"
-
-      # -------------------------
-      # 4️⃣ Generate Xcode project
+      # 3️⃣ Generate Xcode project
       # -------------------------
       - name: Generate Xcode project
         run: |
           set -e
-          cd "$IOS_DIR"
+          cd work/ios/NovaBridgeDemo-iOS
           xcodegen generate
 
           curl -s -X POST "$CALLBACK_URL" \
@@ -85,13 +72,13 @@ jobs:
             -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 4, \"step_state\": \"done\", \"log\": \"iOS: 🏗 Xcode project generated\" }"
 
       # -------------------------
-      # 5️⃣ Locate project + scheme
+      # 4️⃣ Locate project + scheme
       # -------------------------
       - name: Locate Xcode project and scheme
         run: |
           set -e
 
-          XCODEPROJ=$(find "$IOS_DIR" -name "*.xcodeproj" | head -n 1)
+          XCODEPROJ=$(find work -name "*.xcodeproj" | head -n 1)
           if [ -z "$XCODEPROJ" ]; then
             echo "❌ No Xcode project found"
             exit 1
@@ -112,7 +99,7 @@ jobs:
             -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 5, \"step_state\": \"done\", \"log\": \"iOS: 📱 Queued on macOS runner (scheme: $SCHEME)\" }"
 
       # -------------------------
-      # 6️⃣ Build with Xcode
+      # 5️⃣ Build with Xcode
       # -------------------------
       - name: Build iOS app
         run: |
@@ -137,7 +124,7 @@ jobs:
             -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 6, \"step_state\": \"done\", \"log\": \"iOS: ✅ Build completed\" }"
 
       # -------------------------
-      # 7️⃣ Package artifact
+      # 6️⃣ Package build artifact (ZIP)
       # -------------------------
       - name: Package iOS artifact
         run: |
@@ -151,20 +138,42 @@ jobs:
             -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 7, \"step_state\": \"done\", \"log\": \"iOS: 📦 iOS build packaged\" }"
 
       # -------------------------
-      # 8️⃣ Upload artifact + COMPLETE
+      # 7️⃣ Upload ZIP artifact (AUTHENTICATED)
       # -------------------------
-      - name: Upload artifact to Worker
+      - name: Upload ZIP artifact to Worker
         run: |
           set -e
 
           curl -X PUT \
             --data-binary @work/ios-artifact.zip \
+            -H "x-novabridge-token: $CALLBACK_TOKEN" \
             "https://novabridge-ios-build-worker.novabridge.workers.dev/upload-artifact-ios/$BUILD_ID"
 
+      # -------------------------
+      # 8️⃣ (Optional) Build & Upload IPA (ADDITIVE – future-safe)
+      # -------------------------
+      - name: Upload IPA if generated
+        if: success()
+        run: |
+          if [ -f "work/NovaBridge.ipa" ]; then
+            echo "📦 IPA detected — uploading"
+            curl -X PUT \
+              --data-binary @work/NovaBridge.ipa \
+              -H "x-novabridge-token: $CALLBACK_TOKEN" \
+              "https://novabridge-ios-build-worker.novabridge.workers.dev/upload-artifact-ios/$BUILD_ID?type=ipa"
+          else
+            echo "ℹ️ No IPA present (ZIP-only build)"
+          fi
+
+      # -------------------------
+      # 9️⃣ FINAL SUCCESS CALLBACK
+      # -------------------------
+      - name: Final success callback
+        run: |
           curl -s -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d "{ \"build_id\": \"$BUILD_ID\", \"status\": \"success\", \"artifact_key\": \"ios/artifacts/$BUILD_ID.zip\", \"log\": \"iOS: 🎉 Build complete\" }"
+            -d "{ \"build_id\": \"$BUILD_ID\", \"status\": \"success\", \"log\": \"iOS: 🎉 Build complete\" }"
 
       # -------------------------
       # ❌ Failure handler
