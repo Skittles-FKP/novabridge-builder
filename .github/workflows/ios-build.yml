@@ -55,6 +55,9 @@ jobs:
             -H "Content-Type: application/json" \
             -H "x-novabridge-token: $CALLBACK_TOKEN" \
             -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 3, \"step_state\": \"done\", \"log\": \"iOS: 📥 Project ZIP downloaded\" }"
+      curl -X POST "$CALLBACK_URL" \
+  -H "x-novabridge-token: $CALLBACK_TOKEN" \
+  -d '{"build_id":"'$BUILD_ID'","step":3,"status":"done"}'
 
       # -------------------------
       # 2️⃣ Install xcodegen
