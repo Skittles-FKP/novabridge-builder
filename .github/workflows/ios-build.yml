@@ -88,10 +88,13 @@ jobs:
             exit 1
           fi
 
+          # First non-empty target line only (prevents multi-line capture)
           TARGET=$(xcodebuild -list -project "$XCODEPROJ" \
             | sed -n '/Targets:/,/Build Configurations:/p' \
             | sed '1d;$d' \
-            | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
+            | grep -v '^$' \
+            | head -n 1)
 
           if [ -z "$TARGET" ]; then
             echo "❌ No target found"
@@ -148,11 +151,21 @@ jobs:
         run: |
           set -e
 
-          curl -X PUT \
+          # Upload (binary) to Worker endpoint
+          set +e
+          RESP=$(curl -sS -w "\nHTTP_STATUS=%{http_code}\n" -X PUT \
             -H "x-novabridge-token: ${ARTIFACT_UPLOAD_TOKEN:-$CALLBACK_TOKEN}" \
             --data-binary @work/ios-artifact.zip \
-            "https://novabridge-ios-build-worker.novabridge.workers.dev/upload-artifact-ios/$BUILD_ID"
+            "https://novabridge-ios-build-worker.novabridge.workers.dev/upload-artifact-ios/$BUILD_ID")
+          echo "$RESP"
+          echo "$RESP" | grep -q "HTTP_STATUS=200"
+          if [ $? -ne 0 ]; then
+            echo "❌ Artifact upload failed"
+            exit 1
+          fi
+          set -e
 
+          # Finalize in KV (Worker will also terminalize on upload)
           curl -s -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -H "x-novabridge-token: $CALLBACK_TOKEN" \
