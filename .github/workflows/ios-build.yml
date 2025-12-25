@@ -53,7 +53,7 @@ jobs:
           brew install xcodegen
 
       # -------------------------
-      # 3️⃣ Locate iOS project folder (FIX)
+      # 3️⃣ Locate iOS project directory (FIXED)
       # -------------------------
       - name: Locate iOS project directory
         run: |
@@ -83,7 +83,7 @@ jobs:
             -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 4, \"step_state\": \"done\", \"log\": \"iOS: 🏗 Xcode project generated\" }"
 
       # -------------------------
-      # 5️⃣ Locate project + scheme
+      # 5️⃣ Locate Xcode project + scheme (ROBUST)
       # -------------------------
       - name: Locate Xcode project and scheme
         run: |
@@ -95,22 +95,24 @@ jobs:
             exit 1
           fi
 
-          SCHEME=$(xcodebuild -list -project "$XCODEPROJ" | awk '/Schemes:/ {getline; print $1}')
-          if [ -z "$SCHEME" ]; then
-            echo "❌ No scheme found"
-            exit 1
-          fi
-
           echo "XCODEPROJ=$XCODEPROJ" >> $GITHUB_ENV
-          echo "SCHEME=$SCHEME" >> $GITHUB_ENV
+
+          SCHEME=$(xcodebuild -list -project "$XCODEPROJ" | awk '/Schemes:/ {getline; print $1}')
+
+          if [ -n "$SCHEME" ]; then
+            echo "SCHEME=$SCHEME" >> $GITHUB_ENV
+            echo "✅ Using scheme: $SCHEME"
+          else
+            echo "⚠️ No shared scheme found — will build by target"
+          fi
 
           curl -s -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 5, \"step_state\": \"done\", \"log\": \"iOS: 📱 Queued on macOS runner (scheme: $SCHEME)\" }"
+            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 5, \"step_state\": \"done\", \"log\": \"iOS: 📱 Xcode project located\" }"
 
       # -------------------------
-      # 6️⃣ Build with Xcode
+      # 6️⃣ Build with Xcode (SCHEME → TARGET fallback)
       # -------------------------
       - name: Build iOS app
         run: |
@@ -121,13 +123,26 @@ jobs:
             -H "x-novabridge-token: $CALLBACK_TOKEN" \
             -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 6, \"step_state\": \"active\", \"log\": \"iOS: 🔨 Building with Xcode\" }"
 
-          xcodebuild \
-            -project "$XCODEPROJ" \
-            -scheme "$SCHEME" \
-            -configuration Release \
-            -destination generic/platform=iOS \
-            CODE_SIGNING_ALLOWED=NO \
-            build
+          if [ -n "$SCHEME" ]; then
+            xcodebuild \
+              -project "$XCODEPROJ" \
+              -scheme "$SCHEME" \
+              -configuration Release \
+              -destination generic/platform=iOS \
+              CODE_SIGNING_ALLOWED=NO \
+              build
+          else
+            TARGET=$(xcodebuild -list -project "$XCODEPROJ" | awk '/Targets:/ {getline; print $1}')
+            echo "⚙️ Building target: $TARGET"
+
+            xcodebuild \
+              -project "$XCODEPROJ" \
+              -target "$TARGET" \
+              -configuration Release \
+              -destination generic/platform=iOS \
+              CODE_SIGNING_ALLOWED=NO \
+              build
+          fi
 
           curl -s -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
