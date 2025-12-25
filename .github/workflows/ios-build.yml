@@ -53,12 +53,28 @@ jobs:
           brew install xcodegen
 
       # -------------------------
-      # 3️⃣ Generate Xcode project
+      # 3️⃣ Locate iOS project folder (FIX)
+      # -------------------------
+      - name: Locate iOS project directory
+        run: |
+          set -e
+
+          IOS_DIR=$(find work/ios -maxdepth 1 -type d -name "*-iOS" | head -n 1)
+          if [ -z "$IOS_DIR" ]; then
+            echo "❌ No iOS project directory found"
+            exit 1
+          fi
+
+          echo "IOS_DIR=$IOS_DIR" >> $GITHUB_ENV
+          echo "✅ Using iOS directory: $IOS_DIR"
+
+      # -------------------------
+      # 4️⃣ Generate Xcode project
       # -------------------------
       - name: Generate Xcode project
         run: |
           set -e
-          cd work/ios/NovaBridgeDemo-iOS
+          cd "$IOS_DIR"
           xcodegen generate
 
           curl -s -X POST "$CALLBACK_URL" \
@@ -67,14 +83,13 @@ jobs:
             -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 4, \"step_state\": \"done\", \"log\": \"iOS: 🏗 Xcode project generated\" }"
 
       # -------------------------
-      # 4️⃣ Locate project + scheme
+      # 5️⃣ Locate project + scheme
       # -------------------------
       - name: Locate Xcode project and scheme
-        id: locate
         run: |
           set -e
 
-          XCODEPROJ=$(find work -name "*.xcodeproj" | head -n 1)
+          XCODEPROJ=$(find "$IOS_DIR" -name "*.xcodeproj" | head -n 1)
           if [ -z "$XCODEPROJ" ]; then
             echo "❌ No Xcode project found"
             exit 1
@@ -95,7 +110,7 @@ jobs:
             -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 5, \"step_state\": \"done\", \"log\": \"iOS: 📱 Queued on macOS runner (scheme: $SCHEME)\" }"
 
       # -------------------------
-      # 5️⃣ Build with Xcode
+      # 6️⃣ Build with Xcode
       # -------------------------
       - name: Build iOS app
         run: |
@@ -120,7 +135,7 @@ jobs:
             -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 6, \"step_state\": \"done\", \"log\": \"iOS: ✅ Build completed\" }"
 
       # -------------------------
-      # 6️⃣ Package artifact
+      # 7️⃣ Package artifact
       # -------------------------
       - name: Package iOS artifact
         run: |
@@ -134,7 +149,7 @@ jobs:
             -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 7, \"step_state\": \"done\", \"log\": \"iOS: 📦 iOS build packaged\" }"
 
       # -------------------------
-      # 7️⃣ Upload artifact + COMPLETE
+      # 8️⃣ Upload artifact + COMPLETE
       # -------------------------
       - name: Upload artifact to Worker
         run: |
