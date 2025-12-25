@@ -14,6 +14,7 @@ jobs:
       ZIP_URL: ${{ github.event.client_payload.zip_url }}
       CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
       CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
+      ARTIFACT_UPLOAD_TOKEN: ${{ secrets.ARTIFACT_UPLOAD_TOKEN }}
 
     steps:
       # -------------------------
@@ -22,10 +23,6 @@ jobs:
       - name: Validate payload
         run: |
           set -e
-          echo "➡ BUILD_ID=$BUILD_ID"
-          echo "➡ ZIP_URL=$ZIP_URL"
-          echo "➡ CALLBACK_URL=$CALLBACK_URL"
-
           if [ -z "$BUILD_ID" ] || [ -z "$ZIP_URL" ] || [ -z "$CALLBACK_URL" ]; then
             echo "❌ Missing required payload values"
             exit 1
@@ -49,8 +46,7 @@ jobs:
       # 2️⃣ Install xcodegen
       # -------------------------
       - name: Install xcodegen
-        run: |
-          brew install xcodegen
+        run: brew install xcodegen
 
       # -------------------------
       # 3️⃣ Locate iOS project directory
@@ -58,15 +54,12 @@ jobs:
       - name: Locate iOS project directory
         run: |
           set -e
-
           IOS_DIR=$(find work/ios -maxdepth 1 -type d -name "*-iOS" | head -n 1)
           if [ -z "$IOS_DIR" ]; then
             echo "❌ No iOS project directory found"
             exit 1
           fi
-
           echo "IOS_DIR=$IOS_DIR" >> $GITHUB_ENV
-          echo "✅ Using iOS directory: $IOS_DIR"
 
       # -------------------------
       # 4️⃣ Generate Xcode project
@@ -83,7 +76,7 @@ jobs:
             -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 4, \"step_state\": \"done\", \"log\": \"iOS: 🏗 Xcode project generated\" }"
 
       # -------------------------
-      # 5️⃣ Locate Xcode project + TARGET (FINAL FIX)
+      # 5️⃣ Locate Xcode project + FULL target name (FIXED)
       # -------------------------
       - name: Locate Xcode project and target
         run: |
@@ -95,23 +88,26 @@ jobs:
             exit 1
           fi
 
-          TARGET=$(xcodebuild -list -project "$XCODEPROJ" | awk '/Targets:/ {getline; print $1}')
+          TARGET=$(xcodebuild -list -project "$XCODEPROJ" \
+            | sed -n '/Targets:/,/Build Configurations:/p' \
+            | sed '1d;$d')
+
           if [ -z "$TARGET" ]; then
-            echo "❌ No build target found"
+            echo "❌ No target found"
             exit 1
           fi
 
           echo "XCODEPROJ=$XCODEPROJ" >> $GITHUB_ENV
           echo "TARGET=$TARGET" >> $GITHUB_ENV
-          echo "✅ Using target: $TARGET"
+          echo "✅ Using target: [$TARGET]"
 
           curl -s -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 5, \"step_state\": \"done\", \"log\": \"iOS: 📱 Xcode project located (target: $TARGET)\" }"
+            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 5, \"step_state\": \"done\", \"log\": \"iOS: 📱 Target resolved: $TARGET\" }"
 
       # -------------------------
-      # 6️⃣ Build with Xcode (TARGET ONLY)
+      # 6️⃣ Build with Xcode (TARGET — FINAL)
       # -------------------------
       - name: Build iOS app
         run: |
@@ -144,20 +140,15 @@ jobs:
           cd work
           zip -r ios-artifact.zip .
 
-          curl -s -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 7, \"step_state\": \"done\", \"log\": \"iOS: 📦 iOS build packaged\" }"
-
       # -------------------------
-      # 8️⃣ Upload artifact + COMPLETE (AUTH FIX)
+      # 8️⃣ Upload artifact + COMPLETE (AUTH FIXED)
       # -------------------------
       - name: Upload artifact to Worker
         run: |
           set -e
 
           curl -X PUT \
-            -H "x-novabridge-token: $CALLBACK_TOKEN" \
+            -H "x-novabridge-token: ${ARTIFACT_UPLOAD_TOKEN:-$CALLBACK_TOKEN}" \
             --data-binary @work/ios-artifact.zip \
             "https://novabridge-ios-build-worker.novabridge.workers.dev/upload-artifact-ios/$BUILD_ID"
 
