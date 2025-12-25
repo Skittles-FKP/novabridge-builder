@@ -55,7 +55,6 @@ jobs:
             -H "Content-Type: application/json" \
             -H "x-novabridge-token: $CALLBACK_TOKEN" \
             -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 3, \"step_state\": \"done\", \"log\": \"iOS: 📥 Project ZIP downloaded\" }"
-      
 
       # -------------------------
       # 2️⃣ Install xcodegen
@@ -125,16 +124,17 @@ jobs:
             -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 5, \"step_state\": \"done\", \"log\": \"iOS: 📱 Target resolved: $TARGET\" }"
 
       # -------------------------
-      # 6️⃣ Build with Xcode
+      # 6️⃣ Build with Xcode (HARDENED)
       # -------------------------
       - name: Build iOS app
         run: |
           set -e
 
+          # 🔒 ADDITIVE HARDENING BLOCK (requested)
           curl -s -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 6, \"step_state\": \"active\", \"log\": \"iOS: 🔨 Building with Xcode\" }"
+            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 6, \"step_state\": \"active\", \"log\": \"iOS: 🔨 Build started\" }"
 
           xcodebuild \
             -project "$XCODEPROJ" \
