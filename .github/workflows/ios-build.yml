@@ -53,7 +53,7 @@ jobs:
           brew install xcodegen
 
       # -------------------------
-      # 3️⃣ Locate iOS project directory (FIXED)
+      # 3️⃣ Locate iOS project directory
       # -------------------------
       - name: Locate iOS project directory
         run: |
@@ -83,9 +83,9 @@ jobs:
             -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 4, \"step_state\": \"done\", \"log\": \"iOS: 🏗 Xcode project generated\" }"
 
       # -------------------------
-      # 5️⃣ Locate Xcode project + scheme (ROBUST)
+      # 5️⃣ Locate Xcode project + TARGET (FINAL FIX)
       # -------------------------
-      - name: Locate Xcode project and scheme
+      - name: Locate Xcode project and target
         run: |
           set -e
 
@@ -95,24 +95,23 @@ jobs:
             exit 1
           fi
 
-          echo "XCODEPROJ=$XCODEPROJ" >> $GITHUB_ENV
-
-          SCHEME=$(xcodebuild -list -project "$XCODEPROJ" | awk '/Schemes:/ {getline; print $1}')
-
-          if [ -n "$SCHEME" ]; then
-            echo "SCHEME=$SCHEME" >> $GITHUB_ENV
-            echo "✅ Using scheme: $SCHEME"
-          else
-            echo "⚠️ No shared scheme found — will build by target"
+          TARGET=$(xcodebuild -list -project "$XCODEPROJ" | awk '/Targets:/ {getline; print $1}')
+          if [ -z "$TARGET" ]; then
+            echo "❌ No build target found"
+            exit 1
           fi
+
+          echo "XCODEPROJ=$XCODEPROJ" >> $GITHUB_ENV
+          echo "TARGET=$TARGET" >> $GITHUB_ENV
+          echo "✅ Using target: $TARGET"
 
           curl -s -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 5, \"step_state\": \"done\", \"log\": \"iOS: 📱 Xcode project located\" }"
+            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 5, \"step_state\": \"done\", \"log\": \"iOS: 📱 Xcode project located (target: $TARGET)\" }"
 
       # -------------------------
-      # 6️⃣ Build with Xcode (SCHEME → TARGET fallback)
+      # 6️⃣ Build with Xcode (TARGET ONLY)
       # -------------------------
       - name: Build iOS app
         run: |
@@ -123,26 +122,13 @@ jobs:
             -H "x-novabridge-token: $CALLBACK_TOKEN" \
             -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 6, \"step_state\": \"active\", \"log\": \"iOS: 🔨 Building with Xcode\" }"
 
-          if [ -n "$SCHEME" ]; then
-            xcodebuild \
-              -project "$XCODEPROJ" \
-              -scheme "$SCHEME" \
-              -configuration Release \
-              -destination generic/platform=iOS \
-              CODE_SIGNING_ALLOWED=NO \
-              build
-          else
-            TARGET=$(xcodebuild -list -project "$XCODEPROJ" | awk '/Targets:/ {getline; print $1}')
-            echo "⚙️ Building target: $TARGET"
-
-            xcodebuild \
-              -project "$XCODEPROJ" \
-              -target "$TARGET" \
-              -configuration Release \
-              -destination generic/platform=iOS \
-              CODE_SIGNING_ALLOWED=NO \
-              build
-          fi
+          xcodebuild \
+            -project "$XCODEPROJ" \
+            -target "$TARGET" \
+            -configuration Release \
+            -destination generic/platform=iOS \
+            CODE_SIGNING_ALLOWED=NO \
+            build
 
           curl -s -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
@@ -164,13 +150,14 @@ jobs:
             -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 7, \"step_state\": \"done\", \"log\": \"iOS: 📦 iOS build packaged\" }"
 
       # -------------------------
-      # 8️⃣ Upload artifact + COMPLETE
+      # 8️⃣ Upload artifact + COMPLETE (AUTH FIX)
       # -------------------------
       - name: Upload artifact to Worker
         run: |
           set -e
 
           curl -X PUT \
+            -H "x-novabridge-token: $CALLBACK_TOKEN" \
             --data-binary @work/ios-artifact.zip \
             "https://novabridge-ios-build-worker.novabridge.workers.dev/upload-artifact-ios/$BUILD_ID"
 
