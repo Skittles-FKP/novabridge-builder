@@ -76,7 +76,7 @@ jobs:
             -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 4, \"step_state\": \"done\", \"log\": \"iOS: 🏗 Xcode project generated\" }"
 
       # -------------------------
-      # 5️⃣ Locate Xcode project + FULL target name (FIXED)
+      # 5️⃣ Locate Xcode project + TARGET (TRIMMED)
       # -------------------------
       - name: Locate Xcode project and target
         run: |
@@ -90,7 +90,8 @@ jobs:
 
           TARGET=$(xcodebuild -list -project "$XCODEPROJ" \
             | sed -n '/Targets:/,/Build Configurations:/p' \
-            | sed '1d;$d')
+            | sed '1d;$d' \
+            | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
           if [ -z "$TARGET" ]; then
             echo "❌ No target found"
@@ -107,7 +108,7 @@ jobs:
             -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 5, \"step_state\": \"done\", \"log\": \"iOS: 📱 Target resolved: $TARGET\" }"
 
       # -------------------------
-      # 6️⃣ Build with Xcode (TARGET — FINAL)
+      # 6️⃣ Build with Xcode (FINAL)
       # -------------------------
       - name: Build iOS app
         run: |
@@ -141,7 +142,7 @@ jobs:
           zip -r ios-artifact.zip .
 
       # -------------------------
-      # 8️⃣ Upload artifact + COMPLETE (AUTH FIXED)
+      # 8️⃣ Upload artifact + COMPLETE
       # -------------------------
       - name: Upload artifact to Worker
         run: |
