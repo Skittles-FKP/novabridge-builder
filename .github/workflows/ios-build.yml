@@ -57,6 +57,28 @@ jobs:
             -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 3, \"step_state\": \"done\", \"log\": \"iOS: 📥 Project ZIP downloaded\" }"
 
       # -------------------------
+      # 🔍 ONE-SHOT CALLBACK PROOF (TEMPORARY)
+      # -------------------------
+      - name: 🔍 PROVE CALLBACK DELIVERY (one-shot)
+        run: |
+          echo "=== CALLBACK DIAGNOSTIC ==="
+          echo "CALLBACK_URL=$CALLBACK_URL"
+          echo "CALLBACK_TOKEN length=${#CALLBACK_TOKEN}"
+          echo "BUILD_ID=$BUILD_ID"
+
+          RESP=$(curl -sS -D - -o /tmp/callback_body.txt \
+            -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-novabridge-token: $CALLBACK_TOKEN" \
+            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 3, \"step_state\": \"done\", \"log\": \"🔍 CALLBACK DIAGNOSTIC FROM GITHUB\" }")
+
+          echo "----- HTTP RESPONSE HEADERS -----"
+          echo "$RESP"
+          echo "----- HTTP RESPONSE BODY -----"
+          cat /tmp/callback_body.txt
+          echo "================================="
+
+      # -------------------------
       # 2️⃣ Install xcodegen
       # -------------------------
       - name: Install xcodegen
@@ -130,7 +152,6 @@ jobs:
         run: |
           set -e
 
-          # 🔒 ADDITIVE HARDENING BLOCK (requested)
           curl -s -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -H "x-novabridge-token: $CALLBACK_TOKEN" \
