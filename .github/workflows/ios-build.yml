@@ -32,18 +32,6 @@ jobs:
           fi
 
       # ------------------------------------------------------------
-      # 🔐 Debug callback auth (SAFE)
-      # ------------------------------------------------------------
-      - name: Debug callback auth (safe)
-        run: |
-          set -e
-          if [ -z "$CALLBACK_TOKEN" ]; then
-            echo "❌ CALLBACK_TOKEN missing"
-            exit 1
-          fi
-          echo "✅ CALLBACK_TOKEN present"
-
-      # ------------------------------------------------------------
       # 1️⃣ Download ZIP
       # ------------------------------------------------------------
       - name: Download iOS ZIP
@@ -112,7 +100,7 @@ jobs:
             -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 5, \"step_state\": \"done\", \"log\": \"iOS: 📱 Target resolved: $TARGET\" }"
 
       # ------------------------------------------------------------
-      # 6️⃣ Build with Xcode (UNCHANGED — NO SIGNING)
+      # 6️⃣ Build iOS app (NO SIGNING – UNCHANGED)
       # ------------------------------------------------------------
       - name: Build iOS app
         run: |
@@ -126,12 +114,18 @@ jobs:
             build
 
       # ============================================================
-      # 🔐 6.5️⃣ IMPORT SIGNING CERTIFICATE (ADD-ONLY)
+      # 🔐 6.5️⃣ IMPORT SIGNING CERTIFICATE (FIXED)
       # ============================================================
       - name: Import iOS signing certificate
         run: |
           set -e
-          echo "$IOS_P12_BASE64" | base64 --decode > cert.p12
+
+          echo "$IOS_P12_BASE64" | tr -d '\n\r ' | base64 --decode > cert.p12
+
+          if [ ! -s cert.p12 ]; then
+            echo "❌ cert.p12 is empty or invalid"
+            exit 1
+          fi
 
           security create-keychain -p "" build.keychain
           security default-keychain -s build.keychain
@@ -140,12 +134,15 @@ jobs:
           security import cert.p12 \
             -k build.keychain \
             -P "$IOS_P12_PASSWORD" \
+            -f pkcs12 \
             -T /usr/bin/codesign
 
           security set-key-partition-list \
             -S apple-tool:,apple: \
             -s \
             -k "" build.keychain
+
+          echo "✅ iOS signing certificate imported"
 
       # ============================================================
       # 📦 6.6️⃣ ARCHIVE (SIGNED)
