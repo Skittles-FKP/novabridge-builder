@@ -1,0 +1,91 @@
+name: NovaBridge Android Cloud Build — v16.9.6 NEXT
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [novabridge_android_build_v16_9_next]
+
+jobs:
+  android-build-next:
+    runs-on: ubuntu-latest
+
+    env:
+      BUILD_ID: ${{ github.event.client_payload.build_id }}
+      ZIP_URL: ${{ github.event.client_payload.zip_url }}
+      CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
+      CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
+
+      # Plugin config passthrough (NEXT only)
+      ENABLE_CAMERA: ${{ github.event.client_payload.plugins.camera }}
+      ENABLE_LOCATION: ${{ github.event.client_payload.plugins.location }}
+      ENABLE_PUSH: ${{ github.event.client_payload.plugins.push }}
+      ENABLE_SECURE_STORAGE: ${{ github.event.client_payload.plugins.secure_storage }}
+      ENABLE_BIOMETRIC: ${{ github.event.client_payload.plugins.biometric }}
+
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+
+    steps:
+      - name: 🧩 Checkout repo
+        uses: actions/checkout@v4
+
+      - name: 🧪 Print incoming payload (NEXT)
+        run: |
+          echo "BUILD_ID=$BUILD_ID"
+          echo "ZIP_URL=$ZIP_URL"
+          echo "Plugins:"
+          echo "  camera=$ENABLE_CAMERA"
+          echo "  location=$ENABLE_LOCATION"
+          echo "  push=$ENABLE_PUSH"
+          echo "  secure_storage=$ENABLE_SECURE_STORAGE"
+          echo "  biometric=$ENABLE_BIOMETRIC"
+
+      - name: ☕ Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: 📦 Download Android ZIP from Worker (NEXT)
+        run: |
+          curl -L "$ZIP_URL" -o project.zip
+          unzip project.zip -d android-project
+
+      - name: 🔍 Verify plugin stubs exist (non-fatal)
+        run: |
+          ls android-project/app/src/main/java/com/novabridge/app/plugins || true
+
+      - name: 🛠️ Grant Gradle permission
+        run: chmod +x android-project/gradlew
+
+      - name: 🏗️ Build APK (Release → Debug fallback)
+        run: |
+          cd android-project
+          ./gradlew assembleRelease || ./gradlew assembleDebug
+
+      - name: 🔎 Locate APK
+        id: apk
+        run: |
+          APK_PATH=$(find android-project -name "*.apk" | head -n 1)
+          echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
+
+      - name: ☁️ Upload APK to R2
+        run: |
+          curl -X PUT \
+            -H "Authorization: Bearer $R2_SECRET_ACCESS_KEY" \
+            --upload-file "${{ steps.apk.outputs.apk_path }}" \
+            "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${R2_BUCKET}/${BUILD_ID}.apk"
+
+      - name: 📡 Notify Worker callback (NEXT)
+        run: |
+          curl -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-novabridge-token: $CALLBACK_TOKEN" \
+            -d "{
+              \"build_id\": \"$BUILD_ID\",
+              \"status\": \"success\",
+              \"artifact_type\": \"apk\",
+              \"artifact_url\": \"https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${R2_BUCKET}/${BUILD_ID}.apk\"
+            }"
