@@ -21,9 +21,13 @@ jobs:
       R2_BUCKET: ${{ secrets.R2_BUCKET }}
 
     steps:
-      # ------------------------------------------------------------
       - name: 🧪 Print incoming payload
-        run: echo '${{ toJson(github.event.client_payload) }}'
+        run: |
+          echo "EVENT: ${{ github.event.action }}"
+          echo "BUILD_ID=${BUILD_ID}"
+          echo "ZIP_URL=${ZIP_URL}"
+          echo "CALLBACK_URL=${CALLBACK_URL}"
+          echo '${{ toJson(github.event.client_payload) }}'
 
       - name: 🧩 Checkout repo
         uses: actions/checkout@v4
@@ -34,70 +38,55 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      # ------------------------------------------------------------
       - name: 📥 Download Android ZIP
         run: |
           curl -fL "$ZIP_URL" -o android.zip
-          unzip android.zip -d work
-          find work -maxdepth 4 -type f
+          unzip -q android.zip -d work
+          echo "ZIP tree (top):"
+          find work -maxdepth 4 -type f | head -n 200
 
-      # ------------------------------------------------------------
-      # 🔍 Detect Android project root (gradlew)
-      # ------------------------------------------------------------
-      - name: 🔍 Detect Android root
+      - name: 🔍 Detect Android project root
         run: |
-          ANDROID_ROOT=$(find work -name gradlew -type f | head -n 1 | xargs dirname)
-
+          ANDROID_ROOT="$(find work -name gradlew -type f | head -n 1 | xargs dirname)"
           if [ -z "$ANDROID_ROOT" ]; then
-            echo "❌ gradlew not found"
+            echo "❌ gradlew not found in ZIP"
             exit 1
           fi
-
-          echo "ANDROID_ROOT=$ANDROID_ROOT" >> $GITHUB_ENV
           echo "Detected ANDROID_ROOT=$ANDROID_ROOT"
+          echo "ANDROID_ROOT=$ANDROID_ROOT" >> "$GITHUB_ENV"
 
-      # ------------------------------------------------------------
-      # 🧰 Bootstrap Gradle Wrapper (NO ZIP DOWNLOAD)
-      # ------------------------------------------------------------
-      - name: 🧰 Bootstrap Gradle Wrapper
+      - name: 🧰 Bootstrap Gradle Wrapper (no ZIP download)
         run: |
           cd "$ANDROID_ROOT"
-
           mkdir -p gradle/wrapper
 
-          # Download wrapper JAR directly (official)
-          curl -fL https://repo.gradle.org/gradle/libs-releases-local/org/gradle/gradle-wrapper/8.2.2/gradle-wrapper-8.2.2.jar \
+          curl -fL "https://repo.gradle.org/gradle/libs-releases-local/org/gradle/gradle-wrapper/8.2.2/gradle-wrapper-8.2.2.jar" \
             -o gradle/wrapper/gradle-wrapper.jar
 
-          # Write wrapper properties
-          cat > gradle/wrapper/gradle-wrapper.properties <<EOF
-distributionUrl=https\://services.gradle.org/distributions/gradle-8.2.2-bin.zip
-EOF
+          # Write wrapper properties safely (no heredoc)
+          printf '%s\n' 'distributionUrl=https://services.gradle.org/distributions/gradle-8.2.2-bin.zip' \
+            > gradle/wrapper/gradle-wrapper.properties
 
+          echo "Wrapper files:"
           ls -la gradle/wrapper
 
-      # ------------------------------------------------------------
-      # Build APK
-      # ------------------------------------------------------------
       - name: 🏗️ Build Android APK
         run: |
           cd "$ANDROID_ROOT"
-          chmod +x gradlew
+          chmod +x gradlew || true
           ./gradlew assembleRelease || ./gradlew assembleDebug
 
-      # ------------------------------------------------------------
-      # Locate APK
-      # ------------------------------------------------------------
       - name: 🔍 Locate APK
         run: |
-          APK_PATH=$(find "$ANDROID_ROOT" -name "*.apk" | head -n 1)
-          if [ -z "$APK_PATH" ]; then exit 1; fi
-          echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
+          APK_PATH="$(find "$ANDROID_ROOT" -name "*.apk" | head -n 1)"
+          if [ -z "$APK_PATH" ]; then
+            echo "❌ No APK found"
+            exit 1
+          fi
+          echo "Found APK at $APK_PATH"
+          echo "APK_PATH=$APK_PATH" >> "$GITHUB_ENV"
 
-      # ------------------------------------------------------------
-      # Upload APK to Cloudflare R2
-      # ------------------------------------------------------------
-      - name: ☁️ Upload APK to R2
+      - name: ☁️ Upload APK to Cloudflare R2 (public)
         run: |
           OBJECT_KEY="android/${BUILD_ID}.apk"
           PUBLIC_URL="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${R2_BUCKET}/${OBJECT_KEY}"
@@ -110,21 +99,14 @@ EOF
             --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
             --acl public-read
 
-          echo "APK_PUBLIC_URL=$PUBLIC_URL" >> $GITHUB_ENV
+          echo "APK_PUBLIC_URL=$PUBLIC_URL" >> "$GITHUB_ENV"
+          echo "Uploaded APK → $PUBLIC_URL"
 
-      # ------------------------------------------------------------
-      # Callback NEXT worker
-      # ------------------------------------------------------------
-      - name: 🔁 Callback Worker
+      - name: 🔁 Callback NEXT worker (public APK URL)
         run: |
-          curl -X POST "$CALLBACK_URL" \
+          curl -fS -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
-            -d "{
-              \"build_id\": \"${BUILD_ID}\",
-              \"status\": \"success\",
-              \"platform\": \"android\",
-              \"artifact_url\": \"${APK_PUBLIC_URL}\"
-            }"
+            -d "{\"build_id\":\"${BUILD_ID}\",\"status\":\"success\",\"platform\":\"android\",\"artifact_url\":\"${APK_PUBLIC_URL}\"}"
 
       - name: ✅ Build Complete
         run: echo "Android NEXT build completed successfully"
