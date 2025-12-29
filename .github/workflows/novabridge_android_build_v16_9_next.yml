@@ -1,10 +1,9 @@
-name: NovaBridge Android Cloud Build — v16.9.13 NEXT
+name: NovaBridge Android Cloud Build v16.9 NEXT
 
 on:
   workflow_dispatch:
   repository_dispatch:
-    types:
-      - novabridge_android_build_v16_9_next
+    types: [novabridge_android_build_v16_9_next]
 
 jobs:
   android-build-next:
@@ -15,146 +14,121 @@ jobs:
       ZIP_URL: ${{ github.event.client_payload.zip_url }}
       CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
 
-      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       R2_BUCKET: ${{ secrets.R2_BUCKET }}
-
-      # Use one Gradle distro version
-      GRADLE_VERSION: "8.2.2"
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
 
     steps:
+      - name: 🧩 Checkout repo
+        uses: actions/checkout@v4
+
       - name: 🧪 Print incoming payload
         run: |
           echo "BUILD_ID=${BUILD_ID}"
           echo "ZIP_URL=${ZIP_URL}"
           echo "CALLBACK_URL=${CALLBACK_URL}"
-          echo '${{ toJson(github.event.client_payload) }}'
-
-      - name: 🧩 Checkout repo
-        uses: actions/checkout@v4
+          echo "HOME=${HOME}"
 
       - name: ☕ Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: "17"
 
-      - name: 📥 Download Android ZIP
+      # ✅ SAME AS STABLE (THIS FIXES EVERYTHING)
+      - name: 🧱 Setup Gradle 8.2.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.2.1"
+
+      # ✅ SAME AS STABLE
+      - name: 🔐 Ensure Android debug.keystore exists
         run: |
           set -e
-          curl -fL "$ZIP_URL" -o android.zip
-          unzip -q android.zip -d work
-          echo "Top-level after unzip:"
-          ls -la work
-          echo "Find gradlew:"
-          find work -maxdepth 6 -type f -name gradlew -print
+          mkdir -p "$HOME/.android"
 
-      # ------------------------------------------------------------
-      # ✅ Detect AND VERIFY Android root (must contain ./gradlew)
-      # ------------------------------------------------------------
-      - name: 🔍 Detect & verify Android project root
+          if [ ! -f "$HOME/.android/debug.keystore" ]; then
+            "$JAVA_HOME/bin/keytool" -genkeypair \
+              -keystore "$HOME/.android/debug.keystore" \
+              -storepass android \
+              -keypass android \
+              -alias androiddebugkey \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+          test -f "$HOME/.android/debug.keystore"
+
+      - name: 📥 Download ZIP & extract native project
         run: |
           set -e
-          GRADLEW_PATH="$(find work -type f -name gradlew | head -n 1)"
-          if [ -z "$GRADLEW_PATH" ]; then
-            echo "❌ gradlew not found anywhere in ZIP"
-            exit 1
-          fi
+          curl -L "$ZIP_URL" -o native.zip
+          mkdir -p build
+          unzip -q native.zip -d build
+          echo "📂 Extracted build tree:"
+          ls -R build
 
-          ANDROID_ROOT="$(dirname "$GRADLEW_PATH")"
-          echo "Detected ANDROID_ROOT=$ANDROID_ROOT"
-
-          if [ ! -f "$ANDROID_ROOT/gradlew" ]; then
-            echo "❌ ANDROID_ROOT does not contain gradlew"
-            exit 1
-          fi
-
-          echo "ANDROID_ROOT=$ANDROID_ROOT" >> "$GITHUB_ENV"
-          echo "Verified ANDROID_ROOT contents:"
-          ls -la "$ANDROID_ROOT"
-
-      # ------------------------------------------------------------
-      # ✅ Bootstrap wrapper from Gradle distro ZIP (NO Maven, NO 404)
-      # Also uses a fallback URL in case services.gradle.org is blocked
-      # ------------------------------------------------------------
-      - name: 🧰 Bootstrap Gradle Wrapper (robust)
+      # ✅ SAME BUILD LOGIC AS STABLE
+      - name: 🏗 Build APK (Release → Debug fallback)
+        working-directory: build
         run: |
           set -e
-          cd "$ANDROID_ROOT"
-
-          echo "Bootstrapping Gradle wrapper in $(pwd)"
-          mkdir -p gradle/wrapper
-
-          # 1) Write wrapper properties
-          echo "distributionUrl=https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
-            > gradle/wrapper/gradle-wrapper.properties
-
-          # 2) Download Gradle distro zip (primary + fallback)
-          if ! curl -fL "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -o gradle-bin.zip; then
-            echo "Primary download failed, trying fallback..."
-            curl -fL "https://downloads.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -o gradle-bin.zip
+          if [ -x "./gradlew" ]; then
+            ./gradlew assembleRelease --warning-mode all || ./gradlew assembleDebug --warning-mode all
+          else
+            gradle assembleRelease --warning-mode all || gradle assembleDebug --warning-mode all
           fi
-
-          # 3) Extract wrapper jar (search for gradle-wrapper*.jar)
-          rm -rf gradle-tmp
-          mkdir -p gradle-tmp
-          unzip -q gradle-bin.zip -d gradle-tmp
-
-          WRAPPER_JAR_PATH="$(find gradle-tmp -type f -name 'gradle-wrapper*.jar' | head -n 1)"
-          if [ -z "$WRAPPER_JAR_PATH" ]; then
-            echo "❌ Could not find gradle-wrapper jar in distribution"
-            find gradle-tmp -maxdepth 5 -type f | head -n 200
-            exit 1
-          fi
-
-          cp "$WRAPPER_JAR_PATH" gradle/wrapper/gradle-wrapper.jar
-
-          echo "Wrapper files:"
-          ls -la gradle/wrapper
-          file gradle/wrapper/gradle-wrapper.jar || true
-
-      - name: 🏗️ Build Android APK
-        run: |
-          set -e
-          cd "$ANDROID_ROOT"
-          chmod +x gradlew
-          ./gradlew assembleRelease || ./gradlew assembleDebug
 
       - name: 🔍 Locate APK
+        id: find_apk
+        working-directory: build
         run: |
           set -e
-          APK_PATH="$(find "$ANDROID_ROOT" -name "*.apk" | head -n 1)"
+          APK_PATH=$(find app/build/outputs/apk -type f -name "*.apk" | grep -vi "unsigned" | head -n 1 || true)
           if [ -z "$APK_PATH" ]; then
-            echo "❌ No APK found"
+            APK_PATH=$(find app/build/outputs/apk -type f -name "*.apk" | head -n 1 || true)
+          fi
+          if [ -z "$APK_PATH" ]; then
             exit 1
           fi
-          echo "APK_PATH=$APK_PATH" >> "$GITHUB_ENV"
-          echo "Found APK at $APK_PATH"
+          echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
 
-      - name: ☁️ Upload APK to Cloudflare R2 (public)
+      - name: ☁️ Upload APK to R2
+        id: upload_r2
         run: |
           set -e
-          OBJECT_KEY="android/${BUILD_ID}.apk"
-          PUBLIC_URL="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${R2_BUCKET}/${OBJECT_KEY}"
+          APK="build/${{ steps.find_apk.outputs.apk_path }}"
+          DEST_PATH="apks/${BUILD_ID}.apk"
 
-          aws configure set aws_access_key_id "$R2_ACCESS_KEY_ID"
-          aws configure set aws_secret_access_key "$R2_SECRET_ACCESS_KEY"
-          aws configure set default.region auto
-
-          aws s3 cp "$APK_PATH" "s3://${R2_BUCKET}/${OBJECT_KEY}" \
+          AWS_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID}" \
+          AWS_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY}" \
+          aws s3 cp "$APK" "s3://${R2_BUCKET}/${DEST_PATH}" \
             --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
-            --acl public-read
+            --region auto
 
-          echo "APK_PUBLIC_URL=$PUBLIC_URL" >> "$GITHUB_ENV"
-          echo "Uploaded APK → $PUBLIC_URL"
+          APK_URL="https://novabridge-build-worker-next.novabridge.workers.dev/apk/${BUILD_ID}"
+          echo "apk_url=$APK_URL" >> $GITHUB_OUTPUT
 
-      - name: 🔁 Callback NEXT worker (public APK URL)
+      - name: ✅ Notify Worker – success
+        if: success() && env.CALLBACK_URL != ''
         run: |
-          set -e
-          curl -fS -X POST "$CALLBACK_URL" \
+          curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
-            -d "{\"build_id\":\"${BUILD_ID}\",\"status\":\"success\",\"platform\":\"android\",\"artifact_url\":\"${APK_PUBLIC_URL}\"}"
+            -d "$(jq -n \
+                --arg id "$BUILD_ID" \
+                --arg status "success" \
+                --arg art "${{ steps.upload_r2.outputs.apk_url }}" \
+                '{build_id:$id, status:$status, artifact_url:$art}')"
 
-      - name: ✅ Build Complete
-        run: echo "Android NEXT build completed successfully"
+      - name: ❌ Notify Worker – failure
+        if: failure() && env.CALLBACK_URL != ''
+        run: |
+          curl -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+                --arg id "$BUILD_ID" \
+                --arg status "error" \
+                '{build_id:$id, status:$status}')"
