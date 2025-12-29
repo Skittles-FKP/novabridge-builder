@@ -19,16 +19,12 @@ jobs:
       R2_BUCKET: ${{ secrets.R2_BUCKET }}
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
 
+      ANDROID_USER_HOME: ${{ github.workspace }}/.android
+      ANDROID_SDK_HOME: ${{ github.workspace }}
+
     steps:
       - name: 🧩 Checkout repo
         uses: actions/checkout@v4
-
-      - name: 🧪 Print incoming payload
-        run: |
-          echo "BUILD_ID=${BUILD_ID}"
-          echo "ZIP_URL=${ZIP_URL}"
-          echo "CALLBACK_URL=${CALLBACK_URL}"
-          echo "HOME=${HOME}"
 
       - name: ☕ Setup Java 17
         uses: actions/setup-java@v4
@@ -36,19 +32,24 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: 🧱 Setup Gradle 8.2.1
+      - name: 🧱 Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.2.1"
 
-      - name: 🔐 Ensure Android debug.keystore exists
+      # --------------------------------------------------
+      # Debug keystore (clean & deterministic)
+      # --------------------------------------------------
+      - name: 🔐 Setup clean debug.keystore
         run: |
           set -e
-          mkdir -p "$HOME/.android"
+          mkdir -p "$ANDROID_USER_HOME"
 
-          if [ ! -f "$HOME/.android/debug.keystore" ]; then
-            "$JAVA_HOME/bin/keytool" -genkeypair \
-              -keystore "$HOME/.android/debug.keystore" \
+          rm -f build/app/debug.keystore || true
+
+          if [ ! -f "$ANDROID_USER_HOME/debug.keystore" ]; then
+            keytool -genkeypair \
+              -keystore "$ANDROID_USER_HOME/debug.keystore" \
               -storepass android \
               -keypass android \
               -alias androiddebugkey \
@@ -58,146 +59,73 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-          test -f "$HOME/.android/debug.keystore"
-
-      - name: 📥 Download ZIP & extract native project
+      # --------------------------------------------------
+      # Download & extract ZIP
+      # --------------------------------------------------
+      - name: 📥 Download ZIP
         run: |
           set -e
           curl -fL "$ZIP_URL" -o native.zip
-          mkdir -p build
           unzip -q native.zip -d build
-          echo "📂 Extracted build tree:"
-          find build -maxdepth 4 -type f | head -n 200
 
-      # ============================================================
-      # 🩹 FIX: Create fallback mipmap icons when ZIP has only XML
-      # - Generates a valid 1x1 PNG (base64) and places it in mipmap-* dirs
-      # - Ensures ic_launcher_foreground exists for adaptive icon XML
-      # ============================================================
-      - name: 🩹 Fix missing launcher mipmap PNGs (AAPT)
+      # --------------------------------------------------
+      # ✅ REAL launcher icon generation (AAPT-safe)
+      # --------------------------------------------------
+      - name: 🎨 Generate valid launcher icons
         run: |
           set -e
-          RES_DIR="build/app/src/main/res"
+          RES="build/app/src/main/res"
 
-          if [ ! -d "$RES_DIR" ]; then
-            echo "❌ res directory not found at $RES_DIR"
-            ls -la build || true
-            exit 1
-          fi
+          for D in mipmap-mdpi mipmap-hdpi mipmap-xhdpi mipmap-xxhdpi mipmap-xxxhdpi; do
+            mkdir -p "$RES/$D"
 
-          echo "Scanning for launcher references..."
-          grep -R --line-number -E "ic_launcher_foreground|ic_launcher_round|ic_launcher" "$RES_DIR/mipmap-anydpi-v26" || true
-
-          # Only patch if ic_launcher_foreground is referenced somewhere
-          if ! grep -R --line-number -E "ic_launcher_foreground" "$RES_DIR" >/dev/null 2>&1; then
-            echo "No ic_launcher_foreground reference found; skipping."
-            exit 0
-          fi
-
-          echo "ic_launcher_foreground is referenced. Ensuring assets exist..."
-
-          # Find any existing icon PNG/WEBP (often missing in your ZIP)
-          SRC_ICON="$(find "$RES_DIR" -type f \( -name "ic_launcher.png" -o -name "ic_launcher.webp" \) | head -n 1 || true)"
-
-          # If no source icon exists, generate a tiny valid PNG as fallback
-          if [ -z "$SRC_ICON" ]; then
-            echo "No ic_launcher.png/webp found. Generating fallback PNG..."
-            mkdir -p "$RES_DIR/mipmap-mdpi"
-
-            # 1x1 transparent PNG
-            echo "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7Wl2kAAAAASUVORK5CYII=" \
-              | base64 -d > "$RES_DIR/mipmap-mdpi/ic_launcher.png"
-
-            SRC_ICON="$RES_DIR/mipmap-mdpi/ic_launcher.png"
-          fi
-
-          echo "Using source icon: $SRC_ICON"
-          EXT="${SRC_ICON##*.}"
-
-          # Ensure mipmap dirs exist (create common ones)
-          for D in "$RES_DIR/mipmap-mdpi" "$RES_DIR/mipmap-hdpi" "$RES_DIR/mipmap-xhdpi" "$RES_DIR/mipmap-xxhdpi" "$RES_DIR/mipmap-xxxhdpi"; do
-            mkdir -p "$D"
-            # Provide ic_launcher
-            if [ ! -f "$D/ic_launcher.$EXT" ]; then
-              cp "$SRC_ICON" "$D/ic_launcher.$EXT"
-              echo "Created $D/ic_launcher.$EXT"
-            fi
-            # Provide ic_launcher_foreground
-            if [ ! -f "$D/ic_launcher_foreground.$EXT" ]; then
-              cp "$SRC_ICON" "$D/ic_launcher_foreground.$EXT"
-              echo "Created $D/ic_launcher_foreground.$EXT"
-            fi
-            # Provide ic_launcher_round (some templates reference it)
-            if [ ! -f "$D/ic_launcher_round.$EXT" ]; then
-              cp "$SRC_ICON" "$D/ic_launcher_round.$EXT"
-              echo "Created $D/ic_launcher_round.$EXT"
-            fi
+            convert -size 48x48 xc:#3f51b5 "$RES/$D/ic_launcher.png"
+            convert -size 48x48 xc:#3f51b5 "$RES/$D/ic_launcher_round.png"
+            convert -size 48x48 xc:#3f51b5 "$RES/$D/ic_launcher_foreground.png"
           done
 
-          echo "✅ Launcher mipmap patch complete."
-          find "$RES_DIR" -maxdepth 2 -type f -name "ic_launcher*.png" -o -name "ic_launcher*.webp" | head -n 200
+          echo "Launcher icons generated:"
+          find "$RES" -name "ic_launcher*.png"
 
+      # --------------------------------------------------
+      # Build APK
+      # --------------------------------------------------
       - name: 🏗 Build APK (Release → Debug fallback)
         working-directory: build
         run: |
           set -e
-          if [ -x "./gradlew" ]; then
-            ./gradlew assembleRelease --warning-mode all || ./gradlew assembleDebug --warning-mode all
-          else
-            gradle assembleRelease --warning-mode all || gradle assembleDebug --warning-mode all
-          fi
+          ./gradlew assembleRelease || ./gradlew assembleDebug
 
+      # --------------------------------------------------
+      # Locate APK
+      # --------------------------------------------------
       - name: 🔍 Locate APK
         id: find_apk
         working-directory: build
         run: |
-          set -e
-          APK_PATH=$(find app/build/outputs/apk -type f -name "*.apk" | grep -vi "unsigned" | head -n 1 || true)
-          if [ -z "$APK_PATH" ]; then
-            APK_PATH=$(find app/build/outputs/apk -type f -name "*.apk" | head -n 1 || true)
-          fi
-          if [ -z "$APK_PATH" ]; then
-            echo "❌ APK not found"
-            find app/build/outputs -type f | head -n 200 || true
-            exit 1
-          fi
-          echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
-          echo "Found APK at build/$APK_PATH"
+          APK=$(find app/build/outputs/apk -type f -name "*.apk" | head -n 1)
+          test -f "$APK"
+          echo "apk_path=$APK" >> $GITHUB_OUTPUT
 
+      # --------------------------------------------------
+      # Upload to R2
+      # --------------------------------------------------
       - name: ☁️ Upload APK to R2
-        id: upload_r2
         run: |
-          set -e
           APK="build/${{ steps.find_apk.outputs.apk_path }}"
-          DEST_PATH="apks/${BUILD_ID}.apk"
 
           AWS_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID}" \
           AWS_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY}" \
-          aws s3 cp "$APK" "s3://${R2_BUCKET}/${DEST_PATH}" \
+          aws s3 cp "$APK" "s3://${R2_BUCKET}/apks/${BUILD_ID}.apk" \
             --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
             --region auto
 
-          APK_URL="https://novabridge-build-worker-next.novabridge.workers.dev/apk/${BUILD_ID}"
-          echo "apk_url=$APK_URL" >> $GITHUB_OUTPUT
-          echo "Uploaded → $APK_URL"
-
-      - name: ✅ Notify Worker – success
+      # --------------------------------------------------
+      # Callback
+      # --------------------------------------------------
+      - name: ✅ Notify Worker
         if: success() && env.CALLBACK_URL != ''
         run: |
           curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
-            -d "$(jq -n \
-                --arg id "$BUILD_ID" \
-                --arg status "success" \
-                --arg art "${{ steps.upload_r2.outputs.apk_url }}" \
-                '{build_id:$id, status:$status, artifact_url:$art}')"
-
-      - name: ❌ Notify Worker – failure
-        if: failure() && env.CALLBACK_URL != ''
-        run: |
-          curl -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -d "$(jq -n \
-                --arg id "$BUILD_ID" \
-                --arg status "error" \
-                '{build_id:$id, status:$status}')"
+            -d "{\"build_id\":\"$BUILD_ID\",\"status\":\"success\",\"artifact_url\":\"https://novabridge-build-worker-next.novabridge.workers.dev/apk/$BUILD_ID\"}"
