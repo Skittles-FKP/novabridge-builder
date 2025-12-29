@@ -44,7 +44,6 @@ jobs:
         run: |
           set -e
           mkdir -p "$ANDROID_USER_HOME"
-
           rm -f build/app/debug.keystore || true
 
           if [ ! -f "$ANDROID_USER_HOME/debug.keystore" ]; then
@@ -69,23 +68,45 @@ jobs:
           unzip -q native.zip -d build
 
       # --------------------------------------------------
-      # ✅ REAL launcher icon generation (AAPT-safe)
+      # ✅ Install Pillow
       # --------------------------------------------------
-      - name: 🎨 Generate valid launcher icons
+      - name: 🐍 Install Python deps (Pillow)
         run: |
           set -e
-          RES="build/app/src/main/res"
+          python3 --version
+          python3 -m pip install --upgrade pip
+          python3 -m pip install pillow
 
-          for D in mipmap-mdpi mipmap-hdpi mipmap-xhdpi mipmap-xxhdpi mipmap-xxxhdpi; do
-            mkdir -p "$RES/$D"
+      # --------------------------------------------------
+      # ✅ Generate valid launcher icons (AAPT-safe PNGs)
+      # --------------------------------------------------
+      - name: 🎨 Generate valid launcher icons (Pillow)
+        run: |
+          set -e
+          python3 - <<'PY'
+          import os
+          from PIL import Image
 
-            convert -size 48x48 xc:#3f51b5 "$RES/$D/ic_launcher.png"
-            convert -size 48x48 xc:#3f51b5 "$RES/$D/ic_launcher_round.png"
-            convert -size 48x48 xc:#3f51b5 "$RES/$D/ic_launcher_foreground.png"
-          done
+          res = "build/app/src/main/res"
+          dirs = ["mipmap-mdpi","mipmap-hdpi","mipmap-xhdpi","mipmap-xxhdpi","mipmap-xxxhdpi"]
 
-          echo "Launcher icons generated:"
-          find "$RES" -name "ic_launcher*.png"
+          # Solid color PNG (48x48) – valid and AAPT-safe
+          img = Image.new("RGBA", (48,48), (63,81,181,255))
+
+          for d in dirs:
+            path = os.path.join(res, d)
+            os.makedirs(path, exist_ok=True)
+
+            img.save(os.path.join(path, "ic_launcher.png"), "PNG")
+            img.save(os.path.join(path, "ic_launcher_round.png"), "PNG")
+            img.save(os.path.join(path, "ic_launcher_foreground.png"), "PNG")
+
+          print("Generated launcher icons:")
+          for root, _, files in os.walk(res):
+            for f in files:
+              if f.startswith("ic_launcher") and f.endswith(".png"):
+                print(os.path.join(root, f))
+          PY
 
       # --------------------------------------------------
       # Build APK
@@ -103,6 +124,7 @@ jobs:
         id: find_apk
         working-directory: build
         run: |
+          set -e
           APK=$(find app/build/outputs/apk -type f -name "*.apk" | head -n 1)
           test -f "$APK"
           echo "apk_path=$APK" >> $GITHUB_OUTPUT
@@ -112,6 +134,7 @@ jobs:
       # --------------------------------------------------
       - name: ☁️ Upload APK to R2
         run: |
+          set -e
           APK="build/${{ steps.find_apk.outputs.apk_path }}"
 
           AWS_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID}" \
@@ -126,6 +149,7 @@ jobs:
       - name: ✅ Notify Worker
         if: success() && env.CALLBACK_URL != ''
         run: |
+          set -e
           curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -d "{\"build_id\":\"$BUILD_ID\",\"status\":\"success\",\"artifact_url\":\"https://novabridge-build-worker-next.novabridge.workers.dev/apk/$BUILD_ID\"}"
