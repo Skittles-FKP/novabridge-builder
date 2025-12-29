@@ -60,7 +60,8 @@ jobs:
           cd "$ANDROID_ROOT"
           mkdir -p gradle/wrapper
 
-          curl -fL "https://repo.gradle.org/gradle/libs-releases-local/org/gradle/gradle-wrapper/8.2.2/gradle-wrapper-8.2.2.jar" \
+          # ✅ FIXED: Maven Central (reliable) wrapper JAR URL
+          curl -fL "https://repo1.maven.org/maven2/org/gradle/gradle-wrapper/8.2.2/gradle-wrapper-8.2.2.jar" \
             -o gradle/wrapper/gradle-wrapper.jar
 
           # Write wrapper properties safely (no heredoc)
