@@ -36,13 +36,12 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      # ✅ SAME AS STABLE (THIS FIXES EVERYTHING)
+      # ✅ Same as STABLE: avoid wrapper issues
       - name: 🧱 Setup Gradle 8.2.1
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.2.1"
 
-      # ✅ SAME AS STABLE
       - name: 🔐 Ensure Android debug.keystore exists
         run: |
           set -e
@@ -65,13 +64,77 @@ jobs:
       - name: 📥 Download ZIP & extract native project
         run: |
           set -e
-          curl -L "$ZIP_URL" -o native.zip
+          curl -fL "$ZIP_URL" -o native.zip
           mkdir -p build
           unzip -q native.zip -d build
           echo "📂 Extracted build tree:"
-          ls -R build
+          ls -R build | head -n 300
 
-      # ✅ SAME BUILD LOGIC AS STABLE
+      # ============================================================
+      # 🩹 FIX: Ensure @mipmap/ic_launcher_foreground exists
+      # ============================================================
+      - name: 🩹 Fix missing ic_launcher_foreground (AAPT)
+        run: |
+          set -e
+          RES_DIR="build/app/src/main/res"
+
+          if [ ! -d "$RES_DIR" ]; then
+            echo "❌ res directory not found at $RES_DIR"
+            ls -la build || true
+            exit 1
+          fi
+
+          echo "Checking for ic_launcher_foreground references..."
+          # Only run if any launcher XML references ic_launcher_foreground
+          if ! grep -R --line-number -E "ic_launcher_foreground" "$RES_DIR" >/dev/null 2>&1; then
+            echo "No ic_launcher_foreground reference found; skipping."
+            exit 0
+          fi
+
+          echo "ic_launcher_foreground is referenced. Ensuring files exist..."
+
+          # Pick a source icon (ic_launcher.png/webp) from any mipmap folder
+          SRC_ICON="$(find "$RES_DIR" -type f \( -name "ic_launcher.png" -o -name "ic_launcher.webp" \) | head -n 1 || true)"
+          if [ -z "$SRC_ICON" ]; then
+            echo "❌ Could not find ic_launcher.png/webp to use as source"
+            find "$RES_DIR" -maxdepth 3 -type f | head -n 200
+            exit 1
+          fi
+
+          EXT="${SRC_ICON##*.}"
+          echo "Using source icon: $SRC_ICON (ext=$EXT)"
+
+          # Create ic_launcher_foreground.<ext> in every mipmap-* directory
+          for D in "$RES_DIR"/mipmap-*; do
+            if [ -d "$D" ]; then
+              DEST="$D/ic_launcher_foreground.$EXT"
+              if [ ! -f "$DEST" ]; then
+                cp "$SRC_ICON" "$DEST"
+                echo "Created $DEST"
+              else
+                echo "Exists $DEST"
+              fi
+            fi
+          done
+
+          # (Optional) if ic_launcher_round is missing but referenced, create it too
+          if grep -R --line-number -E "ic_launcher_round" "$RES_DIR"/mipmap-anydpi-v26 >/dev/null 2>&1; then
+            SRC_ROUND="$(find "$RES_DIR" -type f \( -name "ic_launcher_round.png" -o -name "ic_launcher_round.webp" \) | head -n 1 || true)"
+            if [ -z "$SRC_ROUND" ]; then
+              for D in "$RES_DIR"/mipmap-*; do
+                if [ -d "$D" ]; then
+                  DEST="$D/ic_launcher_round.$EXT"
+                  if [ ! -f "$DEST" ]; then
+                    cp "$SRC_ICON" "$DEST"
+                    echo "Created $DEST (round fallback)"
+                  fi
+                fi
+              done
+            fi
+          fi
+
+          echo "✅ Icon foreground patch complete."
+
       - name: 🏗 Build APK (Release → Debug fallback)
         working-directory: build
         run: |
@@ -92,9 +155,12 @@ jobs:
             APK_PATH=$(find app/build/outputs/apk -type f -name "*.apk" | head -n 1 || true)
           fi
           if [ -z "$APK_PATH" ]; then
+            echo "❌ APK not found"
+            find app/build/outputs -type f | head -n 200 || true
             exit 1
           fi
           echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
+          echo "Found APK at build/$APK_PATH"
 
       - name: ☁️ Upload APK to R2
         id: upload_r2
@@ -109,8 +175,10 @@ jobs:
             --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
             --region auto
 
+          # Your Worker-friendly download endpoint (keep consistent with your system)
           APK_URL="https://novabridge-build-worker-next.novabridge.workers.dev/apk/${BUILD_ID}"
           echo "apk_url=$APK_URL" >> $GITHUB_OUTPUT
+          echo "Uploaded → $APK_URL"
 
       - name: ✅ Notify Worker – success
         if: success() && env.CALLBACK_URL != ''
