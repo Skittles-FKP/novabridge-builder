@@ -1,4 +1,4 @@
-name: NovaBridge Android Cloud Build — v16.9.12 NEXT
+name: NovaBridge Android Cloud Build — v16.9.13 NEXT
 
 on:
   workflow_dispatch:
@@ -20,13 +20,12 @@ jobs:
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       R2_BUCKET: ${{ secrets.R2_BUCKET }}
 
-      # Choose Gradle version once (wrapper + distribution)
+      # Use one Gradle distro version
       GRADLE_VERSION: "8.2.2"
 
     steps:
       - name: 🧪 Print incoming payload
         run: |
-          echo "EVENT: ${{ github.event.action }}"
           echo "BUILD_ID=${BUILD_ID}"
           echo "ZIP_URL=${ZIP_URL}"
           echo "CALLBACK_URL=${CALLBACK_URL}"
@@ -43,25 +42,43 @@ jobs:
 
       - name: 📥 Download Android ZIP
         run: |
+          set -e
           curl -fL "$ZIP_URL" -o android.zip
           unzip -q android.zip -d work
-          echo "ZIP tree (top):"
-          find work -maxdepth 5 -type f | head -n 200
+          echo "Top-level after unzip:"
+          ls -la work
+          echo "Find gradlew:"
+          find work -maxdepth 6 -type f -name gradlew -print
 
-      - name: 🔍 Detect Android project root
+      # ------------------------------------------------------------
+      # ✅ Detect AND VERIFY Android root (must contain ./gradlew)
+      # ------------------------------------------------------------
+      - name: 🔍 Detect & verify Android project root
         run: |
-          ANDROID_ROOT="$(find work -name gradlew -type f | head -n 1 | xargs dirname)"
-          if [ -z "$ANDROID_ROOT" ]; then
-            echo "❌ gradlew not found in ZIP"
+          set -e
+          GRADLEW_PATH="$(find work -type f -name gradlew | head -n 1)"
+          if [ -z "$GRADLEW_PATH" ]; then
+            echo "❌ gradlew not found anywhere in ZIP"
             exit 1
           fi
+
+          ANDROID_ROOT="$(dirname "$GRADLEW_PATH")"
           echo "Detected ANDROID_ROOT=$ANDROID_ROOT"
+
+          if [ ! -f "$ANDROID_ROOT/gradlew" ]; then
+            echo "❌ ANDROID_ROOT does not contain gradlew"
+            exit 1
+          fi
+
           echo "ANDROID_ROOT=$ANDROID_ROOT" >> "$GITHUB_ENV"
+          echo "Verified ANDROID_ROOT contents:"
+          ls -la "$ANDROID_ROOT"
 
       # ------------------------------------------------------------
-      # ✅ BOOTSTRAP WRAPPER WITHOUT MAVEN JAR URL (NO MORE 404)
+      # ✅ Bootstrap wrapper from Gradle distro ZIP (NO Maven, NO 404)
+      # Also uses a fallback URL in case services.gradle.org is blocked
       # ------------------------------------------------------------
-      - name: 🧰 Bootstrap Gradle Wrapper (extract jar from Gradle distro)
+      - name: 🧰 Bootstrap Gradle Wrapper (robust)
         run: |
           set -e
           cd "$ANDROID_ROOT"
@@ -69,20 +86,25 @@ jobs:
           echo "Bootstrapping Gradle wrapper in $(pwd)"
           mkdir -p gradle/wrapper
 
-          # Write wrapper properties (this is what gradlew uses)
-          printf '%s\n' "distributionUrl=https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
+          # 1) Write wrapper properties
+          echo "distributionUrl=https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
             > gradle/wrapper/gradle-wrapper.properties
 
-          # Download Gradle distribution ZIP (this URL is stable)
-          curl -fL "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -o gradle-bin.zip
+          # 2) Download Gradle distro zip (primary + fallback)
+          if ! curl -fL "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -o gradle-bin.zip; then
+            echo "Primary download failed, trying fallback..."
+            curl -fL "https://downloads.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -o gradle-bin.zip
+          fi
 
-          # Extract wrapper JAR from the distribution (path varies by version, so search)
+          # 3) Extract wrapper jar (search for gradle-wrapper*.jar)
+          rm -rf gradle-tmp
+          mkdir -p gradle-tmp
           unzip -q gradle-bin.zip -d gradle-tmp
 
           WRAPPER_JAR_PATH="$(find gradle-tmp -type f -name 'gradle-wrapper*.jar' | head -n 1)"
           if [ -z "$WRAPPER_JAR_PATH" ]; then
-            echo "❌ Could not locate gradle-wrapper jar in distribution"
-            find gradle-tmp -maxdepth 4 -type f | head -n 200
+            echo "❌ Could not find gradle-wrapper jar in distribution"
+            find gradle-tmp -maxdepth 5 -type f | head -n 200
             exit 1
           fi
 
@@ -96,18 +118,19 @@ jobs:
         run: |
           set -e
           cd "$ANDROID_ROOT"
-          chmod +x gradlew || true
+          chmod +x gradlew
           ./gradlew assembleRelease || ./gradlew assembleDebug
 
       - name: 🔍 Locate APK
         run: |
+          set -e
           APK_PATH="$(find "$ANDROID_ROOT" -name "*.apk" | head -n 1)"
           if [ -z "$APK_PATH" ]; then
             echo "❌ No APK found"
             exit 1
           fi
-          echo "Found APK at $APK_PATH"
           echo "APK_PATH=$APK_PATH" >> "$GITHUB_ENV"
+          echo "Found APK at $APK_PATH"
 
       - name: ☁️ Upload APK to Cloudflare R2 (public)
         run: |
