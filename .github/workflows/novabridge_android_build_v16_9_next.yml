@@ -32,7 +32,7 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: 🧱 Setup Gradle
+      - name: 🧱 Setup Gradle 8.2.1
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.2.1"
@@ -68,19 +68,18 @@ jobs:
           unzip -q native.zip -d build
 
       # --------------------------------------------------
-      # ✅ Install Pillow
+      # Install Pillow (for icon generation)
       # --------------------------------------------------
-      - name: 🐍 Install Python deps (Pillow)
+      - name: 🐍 Install Python deps
         run: |
           set -e
-          python3 --version
           python3 -m pip install --upgrade pip
           python3 -m pip install pillow
 
       # --------------------------------------------------
-      # ✅ Generate valid launcher icons (AAPT-safe PNGs)
+      # Generate valid launcher icons
       # --------------------------------------------------
-      - name: 🎨 Generate valid launcher icons (Pillow)
+      - name: 🎨 Generate valid launcher icons
         run: |
           set -e
           python3 - <<'PY'
@@ -88,25 +87,35 @@ jobs:
           from PIL import Image
 
           res = "build/app/src/main/res"
-          dirs = ["mipmap-mdpi","mipmap-hdpi","mipmap-xhdpi","mipmap-xxhdpi","mipmap-xxxhdpi"]
+          dirs = [
+            "mipmap-mdpi",
+            "mipmap-hdpi",
+            "mipmap-xhdpi",
+            "mipmap-xxhdpi",
+            "mipmap-xxxhdpi"
+          ]
 
-          # Solid color PNG (48x48) – valid and AAPT-safe
-          img = Image.new("RGBA", (48,48), (63,81,181,255))
+          img = Image.new("RGBA", (48, 48), (63, 81, 181, 255))
 
           for d in dirs:
             path = os.path.join(res, d)
             os.makedirs(path, exist_ok=True)
+            img.save(os.path.join(path, "ic_launcher.png"))
+            img.save(os.path.join(path, "ic_launcher_round.png"))
+            img.save(os.path.join(path, "ic_launcher_foreground.png"))
 
-            img.save(os.path.join(path, "ic_launcher.png"), "PNG")
-            img.save(os.path.join(path, "ic_launcher_round.png"), "PNG")
-            img.save(os.path.join(path, "ic_launcher_foreground.png"), "PNG")
-
-          print("Generated launcher icons:")
-          for root, _, files in os.walk(res):
-            for f in files:
-              if f.startswith("ic_launcher") and f.endswith(".png"):
-                print(os.path.join(root, f))
+          print("Launcher icons generated successfully.")
           PY
+
+      # --------------------------------------------------
+      # ✅ FIX: Make Gradle wrapper executable
+      # --------------------------------------------------
+      - name: 🔧 Fix Gradle wrapper permissions
+        working-directory: build
+        run: |
+          set -e
+          chmod +x gradlew
+          ls -l gradlew
 
       # --------------------------------------------------
       # Build APK
