@@ -38,31 +38,6 @@ jobs:
           gradle-version: "8.2.1"
 
       # --------------------------------------------------
-      # 🔐 Create the ONLY debug keystore Gradle may use
-      # --------------------------------------------------
-      - name: 🔐 Setup clean debug.keystore
-        run: |
-          set -e
-          mkdir -p "$ANDROID_USER_HOME"
-
-          # Remove ANY rogue keystores
-          rm -f build/app/debug.keystore || true
-
-          if [ ! -f "$ANDROID_USER_HOME/debug.keystore" ]; then
-            keytool -genkeypair \
-              -keystore "$ANDROID_USER_HOME/debug.keystore" \
-              -storepass android \
-              -keypass android \
-              -alias androiddebugkey \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
-          fi
-
-          keytool -list -keystore "$ANDROID_USER_HOME/debug.keystore" -storepass android
-
-      # --------------------------------------------------
       # Download & extract ZIP
       # --------------------------------------------------
       - name: 📥 Download & extract ZIP
@@ -72,52 +47,67 @@ jobs:
           unzip -q native.zip -d build
 
       # --------------------------------------------------
-      # 🚨 CRITICAL FIX — purge build/app before compile
+      # 🔐 Create a VALID debug keystore AND place it where the template expects
+      # Template expects: build/app/debug.keystore
       # --------------------------------------------------
-      - name: 🧹 Purge local build signing artifacts
+      - name: 🔐 Provide debug.keystore for template signingConfig
         run: |
           set -e
-          rm -rf build/app/build || true
-          rm -f build/app/debug.keystore || true
+          mkdir -p "$ANDROID_USER_HOME"
+          mkdir -p "build/app"
+
+          # Always (re)create a clean keystore in ANDROID_USER_HOME
+          rm -f "$ANDROID_USER_HOME/debug.keystore" || true
+          keytool -genkeypair \
+            -keystore "$ANDROID_USER_HOME/debug.keystore" \
+            -storepass android \
+            -keypass android \
+            -alias androiddebugkey \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+          # Copy to the exact path Gradle is demanding
+          rm -f "build/app/debug.keystore" || true
+          cp "$ANDROID_USER_HOME/debug.keystore" "build/app/debug.keystore"
+
+          echo "✅ debug.keystore installed at build/app/debug.keystore"
+          keytool -list -keystore "build/app/debug.keystore" -storepass android | head -n 40
 
       # --------------------------------------------------
-      # Install Pillow
+      # Install Pillow (icons)
       # --------------------------------------------------
       - name: 🐍 Install Python deps
         run: |
+          set -e
           python3 -m pip install --upgrade pip
           python3 -m pip install pillow
 
       # --------------------------------------------------
-      # Generate valid launcher icons
+      # Generate valid launcher icons (AAPT-safe)
       # --------------------------------------------------
       - name: 🎨 Generate launcher icons
         run: |
+          set -e
           python3 - <<'PY'
           import os
           from PIL import Image
 
           res = "build/app/src/main/res"
-          dirs = [
-            "mipmap-mdpi",
-            "mipmap-hdpi",
-            "mipmap-xhdpi",
-            "mipmap-xxhdpi",
-            "mipmap-xxxhdpi"
-          ]
-
-          img = Image.new("RGBA", (48, 48), (63, 81, 181, 255))
+          dirs = ["mipmap-mdpi","mipmap-hdpi","mipmap-xhdpi","mipmap-xxhdpi","mipmap-xxxhdpi"]
+          img = Image.new("RGBA", (48,48), (63,81,181,255))
 
           for d in dirs:
-            path = os.path.join(res, d)
-            os.makedirs(path, exist_ok=True)
-            img.save(os.path.join(path, "ic_launcher.png"))
-            img.save(os.path.join(path, "ic_launcher_round.png"))
-            img.save(os.path.join(path, "ic_launcher_foreground.png"))
+            p = os.path.join(res, d)
+            os.makedirs(p, exist_ok=True)
+            img.save(os.path.join(p, "ic_launcher.png"))
+            img.save(os.path.join(p, "ic_launcher_round.png"))
+            img.save(os.path.join(p, "ic_launcher_foreground.png"))
           PY
 
       # --------------------------------------------------
-      # ✅ BUILD (DEBUG WILL NOW SIGN CORRECTLY)
+      # Build APK (NO WRAPPER REQUIRED)
       # --------------------------------------------------
       - name: 🏗 Build APK
         working-directory: build
@@ -132,17 +122,18 @@ jobs:
         id: find_apk
         working-directory: build
         run: |
+          set -e
           APK=$(find app/build/outputs/apk -type f -name "*.apk" | head -n 1)
           test -f "$APK"
           echo "apk_path=$APK" >> $GITHUB_OUTPUT
 
       # --------------------------------------------------
-      # Upload APK
+      # Upload APK to R2
       # --------------------------------------------------
       - name: ☁️ Upload APK to R2
         run: |
+          set -e
           APK="build/${{ steps.find_apk.outputs.apk_path }}"
-
           AWS_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID}" \
           AWS_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY}" \
           aws s3 cp "$APK" "s3://${R2_BUCKET}/apks/${BUILD_ID}.apk" \
@@ -155,6 +146,7 @@ jobs:
       - name: ✅ Notify Worker
         if: success() && env.CALLBACK_URL != ''
         run: |
+          set -e
           curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -d "{\"build_id\":\"$BUILD_ID\",\"status\":\"success\",\"artifact_url\":\"https://novabridge-build-worker-next.novabridge.workers.dev/apk/$BUILD_ID\"}"
