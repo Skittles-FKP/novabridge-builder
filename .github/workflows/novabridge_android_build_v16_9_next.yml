@@ -1,4 +1,4 @@
-name: NovaBridge Android Cloud Build — v16.9.9 NEXT
+name: NovaBridge Android Cloud Build — v16.9.10 NEXT
 
 on:
   workflow_dispatch:
@@ -22,26 +22,13 @@ jobs:
 
     steps:
       # ------------------------------------------------------------
-      # Debug incoming payload
-      # ------------------------------------------------------------
       - name: 🧪 Print incoming payload
         run: |
-          echo "EVENT TYPE: ${{ github.event.action }}"
-          echo "BUILD_ID=${BUILD_ID}"
-          echo "ZIP_URL=${ZIP_URL}"
-          echo "CALLBACK_URL=${CALLBACK_URL}"
-          echo "FULL PAYLOAD:"
           echo '${{ toJson(github.event.client_payload) }}'
 
-      # ------------------------------------------------------------
-      # Checkout repo (required by Actions)
-      # ------------------------------------------------------------
       - name: 🧩 Checkout repo
         uses: actions/checkout@v4
 
-      # ------------------------------------------------------------
-      # Java 17 (Android)
-      # ------------------------------------------------------------
       - name: ☕ Setup Java 17
         uses: actions/setup-java@v4
         with:
@@ -49,58 +36,67 @@ jobs:
           java-version: 17
 
       # ------------------------------------------------------------
-      # Download Android ZIP from NEXT worker
-      # ------------------------------------------------------------
-      - name: 📥 Download Android ZIP (NEXT)
+      - name: 📥 Download Android ZIP
         run: |
           curl -L "$ZIP_URL" -o android.zip
           unzip android.zip -d work
-          echo "ZIP contents:"
-          ls -R work
+          echo "ZIP tree:"
+          find work -maxdepth 4 -type f
 
       # ------------------------------------------------------------
-      # 🧰 Bootstrap Gradle Wrapper (PATH FIXED)
+      # 🔍 AUTO-DETECT ANDROID ROOT (THIS FIXES EVERYTHING)
+      # ------------------------------------------------------------
+      - name: 🔍 Detect Android project root
+        run: |
+          ANDROID_ROOT=$(find work -name gradlew -type f | head -n 1 | xargs dirname)
+
+          if [ -z "$ANDROID_ROOT" ]; then
+            echo "❌ gradlew not found in ZIP"
+            exit 1
+          fi
+
+          echo "Detected ANDROID_ROOT=$ANDROID_ROOT"
+          echo "ANDROID_ROOT=$ANDROID_ROOT" >> $GITHUB_ENV
+
+      # ------------------------------------------------------------
+      # 🧰 Bootstrap Gradle Wrapper
       # ------------------------------------------------------------
       - name: 🧰 Bootstrap Gradle Wrapper
-        working-directory: work/android-project/android-project
         run: |
-          echo "Bootstrapping Gradle wrapper..."
+          cd "$ANDROID_ROOT"
+
+          echo "Bootstrapping Gradle wrapper in $(pwd)"
           mkdir -p gradle/wrapper
 
           curl -L https://services.gradle.org/distributions/gradle-8.2.2-bin.zip -o gradle.zip
           unzip -q gradle.zip
 
           cp gradle-8.2.2/lib/gradle-wrapper.jar gradle/wrapper/
-
           echo "distributionUrl=https\\://services.gradle.org/distributions/gradle-8.2.2-bin.zip" \
             > gradle/wrapper/gradle-wrapper.properties
-
-          ls -la gradle/wrapper
 
       # ------------------------------------------------------------
       # Build APK (Release → Debug fallback)
       # ------------------------------------------------------------
-      - name: 🏗️ Build Android APK (NEXT)
-        working-directory: work/android-project/android-project
+      - name: 🏗️ Build Android APK
         run: |
+          cd "$ANDROID_ROOT"
           chmod +x gradlew || true
 
-          echo "Attempting RELEASE build..."
-          ./gradlew assembleRelease || (
-            echo "Release failed — falling back to DEBUG"
-            ./gradlew assembleDebug
-          )
+          ./gradlew assembleRelease || ./gradlew assembleDebug
 
       # ------------------------------------------------------------
       # Locate APK
       # ------------------------------------------------------------
       - name: 🔍 Locate APK
         run: |
-          APK_PATH=$(find work/android-project -name "*.apk" | head -n 1)
+          APK_PATH=$(find "$ANDROID_ROOT" -name "*.apk" | head -n 1)
+
           if [ -z "$APK_PATH" ]; then
             echo "❌ No APK found"
             exit 1
           fi
+
           echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
           echo "Found APK at $APK_PATH"
 
@@ -121,10 +117,9 @@ jobs:
             --acl public-read
 
           echo "APK_PUBLIC_URL=$PUBLIC_URL" >> $GITHUB_ENV
-          echo "Uploaded APK → $PUBLIC_URL"
 
       # ------------------------------------------------------------
-      # Callback NEXT worker with public APK URL
+      # Callback NEXT worker
       # ------------------------------------------------------------
       - name: 🔁 Callback Worker (NEXT)
         if: ${{ env.CALLBACK_URL != '' }}
@@ -138,8 +133,5 @@ jobs:
               \"artifact_url\": \"${APK_PUBLIC_URL}\"
             }"
 
-      # ------------------------------------------------------------
-      # Final log
-      # ------------------------------------------------------------
-      - name: ✅ Build Complete (NEXT)
+      - name: ✅ Build Complete
         run: echo "Android NEXT build completed successfully."
