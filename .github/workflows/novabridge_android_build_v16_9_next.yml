@@ -1,4 +1,4 @@
-name: NovaBridge Android Cloud Build — v16.9.10 NEXT
+name: NovaBridge Android Cloud Build — v16.9.11 NEXT
 
 on:
   workflow_dispatch:
@@ -23,8 +23,7 @@ jobs:
     steps:
       # ------------------------------------------------------------
       - name: 🧪 Print incoming payload
-        run: |
-          echo '${{ toJson(github.event.client_payload) }}'
+        run: echo '${{ toJson(github.event.client_payload) }}'
 
       - name: 🧩 Checkout repo
         uses: actions/checkout@v4
@@ -38,51 +37,52 @@ jobs:
       # ------------------------------------------------------------
       - name: 📥 Download Android ZIP
         run: |
-          curl -L "$ZIP_URL" -o android.zip
+          curl -fL "$ZIP_URL" -o android.zip
           unzip android.zip -d work
-          echo "ZIP tree:"
           find work -maxdepth 4 -type f
 
       # ------------------------------------------------------------
-      # 🔍 AUTO-DETECT ANDROID ROOT (THIS FIXES EVERYTHING)
+      # 🔍 Detect Android project root (gradlew)
       # ------------------------------------------------------------
-      - name: 🔍 Detect Android project root
+      - name: 🔍 Detect Android root
         run: |
           ANDROID_ROOT=$(find work -name gradlew -type f | head -n 1 | xargs dirname)
 
           if [ -z "$ANDROID_ROOT" ]; then
-            echo "❌ gradlew not found in ZIP"
+            echo "❌ gradlew not found"
             exit 1
           fi
 
-          echo "Detected ANDROID_ROOT=$ANDROID_ROOT"
           echo "ANDROID_ROOT=$ANDROID_ROOT" >> $GITHUB_ENV
+          echo "Detected ANDROID_ROOT=$ANDROID_ROOT"
 
       # ------------------------------------------------------------
-      # 🧰 Bootstrap Gradle Wrapper
+      # 🧰 Bootstrap Gradle Wrapper (NO ZIP DOWNLOAD)
       # ------------------------------------------------------------
       - name: 🧰 Bootstrap Gradle Wrapper
         run: |
           cd "$ANDROID_ROOT"
 
-          echo "Bootstrapping Gradle wrapper in $(pwd)"
           mkdir -p gradle/wrapper
 
-          curl -L https://services.gradle.org/distributions/gradle-8.2.2-bin.zip -o gradle.zip
-          unzip -q gradle.zip
+          # Download wrapper JAR directly (official)
+          curl -fL https://repo.gradle.org/gradle/libs-releases-local/org/gradle/gradle-wrapper/8.2.2/gradle-wrapper-8.2.2.jar \
+            -o gradle/wrapper/gradle-wrapper.jar
 
-          cp gradle-8.2.2/lib/gradle-wrapper.jar gradle/wrapper/
-          echo "distributionUrl=https\\://services.gradle.org/distributions/gradle-8.2.2-bin.zip" \
-            > gradle/wrapper/gradle-wrapper.properties
+          # Write wrapper properties
+          cat > gradle/wrapper/gradle-wrapper.properties <<EOF
+distributionUrl=https\://services.gradle.org/distributions/gradle-8.2.2-bin.zip
+EOF
+
+          ls -la gradle/wrapper
 
       # ------------------------------------------------------------
-      # Build APK (Release → Debug fallback)
+      # Build APK
       # ------------------------------------------------------------
       - name: 🏗️ Build Android APK
         run: |
           cd "$ANDROID_ROOT"
-          chmod +x gradlew || true
-
+          chmod +x gradlew
           ./gradlew assembleRelease || ./gradlew assembleDebug
 
       # ------------------------------------------------------------
@@ -91,17 +91,11 @@ jobs:
       - name: 🔍 Locate APK
         run: |
           APK_PATH=$(find "$ANDROID_ROOT" -name "*.apk" | head -n 1)
-
-          if [ -z "$APK_PATH" ]; then
-            echo "❌ No APK found"
-            exit 1
-          fi
-
+          if [ -z "$APK_PATH" ]; then exit 1; fi
           echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
-          echo "Found APK at $APK_PATH"
 
       # ------------------------------------------------------------
-      # Upload APK to Cloudflare R2 (PUBLIC)
+      # Upload APK to Cloudflare R2
       # ------------------------------------------------------------
       - name: ☁️ Upload APK to R2
         run: |
@@ -121,8 +115,7 @@ jobs:
       # ------------------------------------------------------------
       # Callback NEXT worker
       # ------------------------------------------------------------
-      - name: 🔁 Callback Worker (NEXT)
-        if: ${{ env.CALLBACK_URL != '' }}
+      - name: 🔁 Callback Worker
         run: |
           curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
@@ -134,4 +127,4 @@ jobs:
             }"
 
       - name: ✅ Build Complete
-        run: echo "Android NEXT build completed successfully."
+        run: echo "Android NEXT build completed successfully"
