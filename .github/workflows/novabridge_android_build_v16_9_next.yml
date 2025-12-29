@@ -1,4 +1,4 @@
-name: NovaBridge Android Cloud Build — v16.9.11 NEXT
+name: NovaBridge Android Cloud Build — v16.9.12 NEXT
 
 on:
   workflow_dispatch:
@@ -19,6 +19,9 @@ jobs:
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       R2_BUCKET: ${{ secrets.R2_BUCKET }}
+
+      # Choose Gradle version once (wrapper + distribution)
+      GRADLE_VERSION: "8.2.2"
 
     steps:
       - name: 🧪 Print incoming payload
@@ -43,7 +46,7 @@ jobs:
           curl -fL "$ZIP_URL" -o android.zip
           unzip -q android.zip -d work
           echo "ZIP tree (top):"
-          find work -maxdepth 4 -type f | head -n 200
+          find work -maxdepth 5 -type f | head -n 200
 
       - name: 🔍 Detect Android project root
         run: |
@@ -55,24 +58,43 @@ jobs:
           echo "Detected ANDROID_ROOT=$ANDROID_ROOT"
           echo "ANDROID_ROOT=$ANDROID_ROOT" >> "$GITHUB_ENV"
 
-      - name: 🧰 Bootstrap Gradle Wrapper (no ZIP download)
+      # ------------------------------------------------------------
+      # ✅ BOOTSTRAP WRAPPER WITHOUT MAVEN JAR URL (NO MORE 404)
+      # ------------------------------------------------------------
+      - name: 🧰 Bootstrap Gradle Wrapper (extract jar from Gradle distro)
         run: |
+          set -e
           cd "$ANDROID_ROOT"
+
+          echo "Bootstrapping Gradle wrapper in $(pwd)"
           mkdir -p gradle/wrapper
 
-          # ✅ FIXED: Maven Central (reliable) wrapper JAR URL
-          curl -fL "https://repo1.maven.org/maven2/org/gradle/gradle-wrapper/8.2.2/gradle-wrapper-8.2.2.jar" \
-            -o gradle/wrapper/gradle-wrapper.jar
-
-          # Write wrapper properties safely (no heredoc)
-          printf '%s\n' 'distributionUrl=https://services.gradle.org/distributions/gradle-8.2.2-bin.zip' \
+          # Write wrapper properties (this is what gradlew uses)
+          printf '%s\n' "distributionUrl=https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
             > gradle/wrapper/gradle-wrapper.properties
+
+          # Download Gradle distribution ZIP (this URL is stable)
+          curl -fL "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -o gradle-bin.zip
+
+          # Extract wrapper JAR from the distribution (path varies by version, so search)
+          unzip -q gradle-bin.zip -d gradle-tmp
+
+          WRAPPER_JAR_PATH="$(find gradle-tmp -type f -name 'gradle-wrapper*.jar' | head -n 1)"
+          if [ -z "$WRAPPER_JAR_PATH" ]; then
+            echo "❌ Could not locate gradle-wrapper jar in distribution"
+            find gradle-tmp -maxdepth 4 -type f | head -n 200
+            exit 1
+          fi
+
+          cp "$WRAPPER_JAR_PATH" gradle/wrapper/gradle-wrapper.jar
 
           echo "Wrapper files:"
           ls -la gradle/wrapper
+          file gradle/wrapper/gradle-wrapper.jar || true
 
       - name: 🏗️ Build Android APK
         run: |
+          set -e
           cd "$ANDROID_ROOT"
           chmod +x gradlew || true
           ./gradlew assembleRelease || ./gradlew assembleDebug
@@ -89,6 +111,7 @@ jobs:
 
       - name: ☁️ Upload APK to Cloudflare R2 (public)
         run: |
+          set -e
           OBJECT_KEY="android/${BUILD_ID}.apk"
           PUBLIC_URL="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${R2_BUCKET}/${OBJECT_KEY}"
 
@@ -105,6 +128,7 @@ jobs:
 
       - name: 🔁 Callback NEXT worker (public APK URL)
         run: |
+          set -e
           curl -fS -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -d "{\"build_id\":\"${BUILD_ID}\",\"status\":\"success\",\"platform\":\"android\",\"artifact_url\":\"${APK_PUBLIC_URL}\"}"
