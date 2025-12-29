@@ -39,19 +39,20 @@ jobs:
           java-version: "17"
 
       # --------------------------------------------------
-      # Gradle (cache only — wrapper still required)
+      # Gradle (NO WRAPPER)
       # --------------------------------------------------
-      - name: 🧱 Setup Gradle cache
+      - name: 🧱 Setup Gradle
         uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.2.1"
 
       # --------------------------------------------------
-      # Debug keystore (clean)
+      # Debug keystore
       # --------------------------------------------------
       - name: 🔐 Setup debug.keystore
         run: |
           set -e
           mkdir -p "$ANDROID_USER_HOME"
-          rm -f build/app/debug.keystore || true
 
           if [ ! -f "$ANDROID_USER_HOME/debug.keystore" ]; then
             keytool -genkeypair \
@@ -73,14 +74,12 @@ jobs:
           set -e
           curl -fL "$ZIP_URL" -o native.zip
           unzip -q native.zip -d build
-          ls -la build
 
       # --------------------------------------------------
       # Install Pillow
       # --------------------------------------------------
       - name: 🐍 Install Python deps
         run: |
-          set -e
           python3 -m pip install --upgrade pip
           python3 -m pip install pillow
 
@@ -89,13 +88,12 @@ jobs:
       # --------------------------------------------------
       - name: 🎨 Generate launcher icons
         run: |
-          set -e
           python3 - <<'PY'
           import os
           from PIL import Image
 
           res = "build/app/src/main/res"
-          dirs = [
+          sizes = [
             "mipmap-mdpi",
             "mipmap-hdpi",
             "mipmap-xhdpi",
@@ -105,41 +103,22 @@ jobs:
 
           img = Image.new("RGBA", (48, 48), (63, 81, 181, 255))
 
-          for d in dirs:
-            path = os.path.join(res, d)
-            os.makedirs(path, exist_ok=True)
-            img.save(os.path.join(path, "ic_launcher.png"))
-            img.save(os.path.join(path, "ic_launcher_round.png"))
-            img.save(os.path.join(path, "ic_launcher_foreground.png"))
+          for s in sizes:
+            d = os.path.join(res, s)
+            os.makedirs(d, exist_ok=True)
+            img.save(os.path.join(d, "ic_launcher.png"))
+            img.save(os.path.join(d, "ic_launcher_round.png"))
+            img.save(os.path.join(d, "ic_launcher_foreground.png"))
           PY
 
       # --------------------------------------------------
-      # ✅ FIX: Bootstrap Gradle wrapper JAR (THIS WAS MISSING)
+      # ✅ BUILD USING GRADLE (NO WRAPPER)
       # --------------------------------------------------
-      - name: 🧰 Bootstrap Gradle wrapper
+      - name: 🏗 Build APK
         working-directory: build
         run: |
           set -e
-          chmod +x gradlew
-
-          if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
-            echo "gradle-wrapper.jar missing — downloading..."
-            mkdir -p gradle/wrapper
-            curl -fL \
-              https://repo1.maven.org/maven2/org/gradle/gradle-wrapper/8.2.1/gradle-wrapper-8.2.1.jar \
-              -o gradle/wrapper/gradle-wrapper.jar
-          fi
-
-          ls -la gradle/wrapper
-
-      # --------------------------------------------------
-      # Build APK
-      # --------------------------------------------------
-      - name: 🏗 Build APK (Release → Debug fallback)
-        working-directory: build
-        run: |
-          set -e
-          ./gradlew assembleRelease || ./gradlew assembleDebug
+          gradle assembleRelease || gradle assembleDebug
 
       # --------------------------------------------------
       # Locate APK
@@ -148,17 +127,15 @@ jobs:
         id: find_apk
         working-directory: build
         run: |
-          set -e
           APK=$(find app/build/outputs/apk -type f -name "*.apk" | head -n 1)
           test -f "$APK"
           echo "apk_path=$APK" >> $GITHUB_OUTPUT
 
       # --------------------------------------------------
-      # Upload to R2
+      # Upload APK
       # --------------------------------------------------
       - name: ☁️ Upload APK to R2
         run: |
-          set -e
           APK="build/${{ steps.find_apk.outputs.apk_path }}"
 
           AWS_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID}" \
@@ -173,7 +150,6 @@ jobs:
       - name: ✅ Notify Worker
         if: success() && env.CALLBACK_URL != ''
         run: |
-          set -e
           curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -d "{\"build_id\":\"$BUILD_ID\",\"status\":\"success\",\"artifact_url\":\"https://novabridge-build-worker-next.novabridge.workers.dev/apk/$BUILD_ID\"}"
