@@ -23,24 +23,31 @@ jobs:
       ANDROID_SDK_HOME: ${{ github.workspace }}
 
     steps:
+      # --------------------------------------------------
+      # Checkout
+      # --------------------------------------------------
       - name: 🧩 Checkout repo
         uses: actions/checkout@v4
 
+      # --------------------------------------------------
+      # Java
+      # --------------------------------------------------
       - name: ☕ Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: 🧱 Setup Gradle 8.2.1
+      # --------------------------------------------------
+      # Gradle (cache only — wrapper still required)
+      # --------------------------------------------------
+      - name: 🧱 Setup Gradle cache
         uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.2.1"
 
       # --------------------------------------------------
-      # Debug keystore (clean & deterministic)
+      # Debug keystore (clean)
       # --------------------------------------------------
-      - name: 🔐 Setup clean debug.keystore
+      - name: 🔐 Setup debug.keystore
         run: |
           set -e
           mkdir -p "$ANDROID_USER_HOME"
@@ -59,16 +66,17 @@ jobs:
           fi
 
       # --------------------------------------------------
-      # Download & extract ZIP
+      # Download ZIP
       # --------------------------------------------------
-      - name: 📥 Download ZIP
+      - name: 📥 Download & extract ZIP
         run: |
           set -e
           curl -fL "$ZIP_URL" -o native.zip
           unzip -q native.zip -d build
+          ls -la build
 
       # --------------------------------------------------
-      # Install Pillow (for icon generation)
+      # Install Pillow
       # --------------------------------------------------
       - name: 🐍 Install Python deps
         run: |
@@ -77,9 +85,9 @@ jobs:
           python3 -m pip install pillow
 
       # --------------------------------------------------
-      # Generate valid launcher icons
+      # Generate launcher icons (AAPT-safe)
       # --------------------------------------------------
-      - name: 🎨 Generate valid launcher icons
+      - name: 🎨 Generate launcher icons
         run: |
           set -e
           python3 - <<'PY'
@@ -103,19 +111,26 @@ jobs:
             img.save(os.path.join(path, "ic_launcher.png"))
             img.save(os.path.join(path, "ic_launcher_round.png"))
             img.save(os.path.join(path, "ic_launcher_foreground.png"))
-
-          print("Launcher icons generated successfully.")
           PY
 
       # --------------------------------------------------
-      # ✅ FIX: Make Gradle wrapper executable
+      # ✅ FIX: Bootstrap Gradle wrapper JAR (THIS WAS MISSING)
       # --------------------------------------------------
-      - name: 🔧 Fix Gradle wrapper permissions
+      - name: 🧰 Bootstrap Gradle wrapper
         working-directory: build
         run: |
           set -e
           chmod +x gradlew
-          ls -l gradlew
+
+          if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
+            echo "gradle-wrapper.jar missing — downloading..."
+            mkdir -p gradle/wrapper
+            curl -fL \
+              https://repo1.maven.org/maven2/org/gradle/gradle-wrapper/8.2.1/gradle-wrapper-8.2.1.jar \
+              -o gradle/wrapper/gradle-wrapper.jar
+          fi
+
+          ls -la gradle/wrapper
 
       # --------------------------------------------------
       # Build APK
