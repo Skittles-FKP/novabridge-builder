@@ -1,9 +1,10 @@
-name: NovaBridge Android Cloud Build v17 NEXT
+name: NovaBridge Android Cloud Build v16.9 NEXT
 
 on:
   workflow_dispatch:
   repository_dispatch:
-    types: [novabridge_android_build_v17_next]
+    types:
+      - novabridge_android_build_v16_9_next
 
 jobs:
   android-build:
@@ -13,338 +14,107 @@ jobs:
       BUILD_ID: ${{ github.event.client_payload.build_id }}
       ZIP_URL: ${{ github.event.client_payload.zip_url }}
       CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
-      PLUGINS: ${{ toJson(github.event.client_payload.plugins) }}
 
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       R2_BUCKET: ${{ secrets.R2_BUCKET }}
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
       R2_PUBLIC_BASE: ${{ secrets.R2_PUBLIC_BASE }}
-
       CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
 
     steps:
-      - name: 🧩 Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 🧪 Print incoming payload
-        shell: bash
+      - name: Print payload
         run: |
-          set -e
           echo "BUILD_ID=${BUILD_ID}"
           echo "ZIP_URL=${ZIP_URL}"
           echo "CALLBACK_URL=${CALLBACK_URL}"
-          echo "PLUGINS=${PLUGINS}"
 
-      - name: ☕ Setup Java 17
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: 🤖 Setup Android SDK
+      - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: 🧰 Setup Gradle (for wrapper repair)
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: 📥 Download ZIP
-        shell: bash
+      - name: Download ZIP
         run: |
-          set -e
           mkdir -p work
-          echo "Downloading ZIP..."
-          curl -L --fail --retry 3 --retry-delay 2 "${ZIP_URL}" -o work/project.zip
-          ls -lh work/project.zip
+          curl -L --fail "$ZIP_URL" -o work/project.zip
 
-      - name: 📦 Extract ZIP
-        shell: bash
+      - name: Extract ZIP
         run: |
-          set -e
-          rm -rf work/extracted
           mkdir -p work/extracted
           unzip -q work/project.zip -d work/extracted
 
-          echo "Top level:"
-          ls -la work/extracted | head -n 80
-
-          # Find Android project root (must contain settings.gradle or settings.gradle.kts)
-          ANDROID_ROOT="$(python3 - <<'PY'
-import os
-candidates=[]
-for root, dirs, files in os.walk("work/extracted"):
-  if "settings.gradle" in files or "settings.gradle.kts" in files:
-    candidates.append(root)
-# prefer the shortest path (closest to root)
-candidates=sorted(candidates, key=lambda p: len(p.split("/")))
-print(candidates[0] if candidates else "")
-PY
-)"
-          if [ -z "${ANDROID_ROOT}" ]; then
-            echo "❌ Could not find Android project root (settings.gradle not found)."
-            exit 1
-          fi
-
-          echo "ANDROID_ROOT=${ANDROID_ROOT}" | tee -a $GITHUB_ENV
-          echo "✅ Found ANDROID_ROOT=${ANDROID_ROOT}"
-          ls -la "${ANDROID_ROOT}" | head -n 80
-
-      - name: 🔧 Ensure gradlew executable
-        shell: bash
+      - name: Set ANDROID_ROOT (known layout)
         run: |
-          set -e
-          cd "${ANDROID_ROOT}"
-          if [ -f "./gradlew" ]; then
-            chmod +x ./gradlew
-            echo "✅ gradlew present"
-          else
-            echo "❌ gradlew missing"
-            ls -la
-            exit 1
-          fi
+          echo "ANDROID_ROOT=work/extracted/android-project" >> $GITHUB_ENV
+          ls -la work/extracted
 
-      - name: 🧯 Repair Gradle wrapper if jar missing
-        shell: bash
+      - name: Make gradlew executable
         run: |
-          set -e
-          cd "${ANDROID_ROOT}"
+          cd "$ANDROID_ROOT"
+          chmod +x gradlew
 
-          if [ -f "gradle/wrapper/gradle-wrapper.jar" ]; then
-            echo "✅ gradle-wrapper.jar present"
-            exit 0
-          fi
-
-          echo "❌ gradle-wrapper.jar missing — generating wrapper using system Gradle..."
-          echo "Wrapper folder contents:"
-          ls -la gradle/wrapper || true
-
-          # Use system gradle installed by setup-gradle to generate wrapper scripts + jar
-          gradle wrapper --gradle-version 8.7 --distribution-type all
-
-          if [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
-            echo "❌ Wrapper generation failed (gradle-wrapper.jar still missing)"
-            ls -la gradle/wrapper || true
-            exit 1
-          fi
-
-          chmod +x ./gradlew
-          echo "✅ Wrapper repaired"
-
-      - name: 🧩 Patch Android resources (ic_launcher_foreground missing)
-        shell: bash
+      - name: Repair Gradle wrapper if missing
         run: |
-          set -e
-          cd "${ANDROID_ROOT}"
+          cd "$ANDROID_ROOT"
+          if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
+            gradle wrapper --gradle-version 8.7
+          fi
 
-          # Some templates reference ic_launcher_foreground but don't include it.
-          # Quick fix: change adaptive icon xml to use @mipmap/ic_launcher
-          for f in app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml; do
-            if [ -f "$f" ]; then
-              sed -i 's/@mipmap\/ic_launcher_foreground/@mipmap\/ic_launcher/g' "$f" || true
-              echo "✅ Patched $f"
-            fi
-          done
-
-      - name: 🧩 Patch Gradle deps for NEXT plugins (biometric/location)
-        shell: bash
+      - name: Fix launcher foreground reference
         run: |
-          set -e
-          cd "${ANDROID_ROOT}"
+          cd "$ANDROID_ROOT"
+          sed -i 's/@mipmap\/ic_launcher_foreground/@mipmap\/ic_launcher/g' \
+            app/src/main/res/mipmap-anydpi-v26/ic_launcher*.xml || true
 
-          APP_GRADLE=""
-          if [ -f "app/build.gradle" ]; then
-            APP_GRADLE="app/build.gradle"
-          elif [ -f "app/build.gradle.kts" ]; then
-            APP_GRADLE="app/build.gradle.kts"
-          else
-            echo "❌ app/build.gradle(.kts) not found"
-            exit 1
-          fi
-
-          echo "Using ${APP_GRADLE}"
-
-          # Ensure repositories include google()
-          if ! grep -q "google()" "${APP_GRADLE}"; then
-            echo "⚠️ google() not detected in app gradle; project-level should include it. Continuing."
-          fi
-
-          # Add deps defensively (safe even if plugins not used)
-          if ! grep -q "play-services-location" "${APP_GRADLE}"; then
-            echo "Adding play-services-location dependency..."
-            python3 - <<'PY'
-import re
-p="app/build.gradle"
-try:
-  open(p).read()
-except:
-  p="app/build.gradle.kts"
-txt=open(p).read()
-if "dependencies" not in txt:
-  raise SystemExit("No dependencies block found")
-# insert into first dependencies { ... }
-def ins(txt, line):
-  m=re.search(r"dependencies\s*\{", txt)
-  if not m: return txt
-  i=m.end()
-  return txt[:i] + "\n    " + line + txt[i:]
-line = 'implementation "com.google.android.gms:play-services-location:21.3.0"'
-if p.endswith(".kts"):
-  line = 'implementation("com.google.android.gms:play-services-location:21.3.0")'
-print("PATCH_FILE="+p)
-open(p,"w").write(ins(txt,line))
-PY
-          fi
-
-          if ! grep -q "androidx.biometric" "${APP_GRADLE}"; then
-            echo "Adding androidx.biometric dependency..."
-            python3 - <<'PY'
-import re
-p="app/build.gradle"
-try:
-  open(p).read()
-except:
-  p="app/build.gradle.kts"
-txt=open(p).read()
-m=re.search(r"dependencies\s*\{", txt)
-if not m: raise SystemExit("No dependencies block found")
-i=m.end()
-line='implementation "androidx.biometric:biometric:1.2.0-alpha05"'
-if p.endswith(".kts"):
-  line='implementation("androidx.biometric:biometric:1.2.0-alpha05")'
-txt=txt[:i] + "\n    " + line + txt[i:]
-open(p,"w").write(txt)
-PY
-          fi
-
-      - name: 🔐 Ensure valid debug keystore (fix validateSigningDebug)
-        shell: bash
+      - name: Create debug keystore
         run: |
-          set -e
-          cd "${ANDROID_ROOT}"
-
-          # If project expects app/debug.keystore, ensure it's valid.
-          # (Your logs showed it looking for build/app/debug.keystore in some cases;
-          # this ensures app/debug.keystore exists and is readable.)
-          mkdir -p app
-          KEYSTORE="app/debug.keystore"
-
-          # Remove invalid keystore if present
-          if [ -f "${KEYSTORE}" ]; then
-            echo "Existing debug.keystore found - removing to regenerate clean"
-            rm -f "${KEYSTORE}"
-          fi
-
+          cd "$ANDROID_ROOT"
+          rm -f app/debug.keystore || true
           keytool -genkeypair -v \
-            -keystore "${KEYSTORE}" \
+            -keystore app/debug.keystore \
             -storepass android \
             -alias androiddebugkey \
             -keypass android \
             -keyalg RSA -keysize 2048 -validity 10000 \
-            -dname "CN=Android Debug,O=Android,C=US"
+            -dname "CN=Android,O=Android,C=US"
 
-          echo "✅ Generated ${KEYSTORE}"
-          ls -la app | head -n 50
-
-      - name: 🏗️ Build APK (Release → Debug fallback)
-        shell: bash
+      - name: Build APK (release → debug)
         run: |
-          set -e
-          cd "${ANDROID_ROOT}"
+          cd "$ANDROID_ROOT"
+          ./gradlew assembleRelease || ./gradlew assembleDebug
 
-          echo "Running release build..."
-          if ./gradlew --no-daemon assembleRelease; then
-            echo "✅ Release APK built"
-          else
-            echo "⚠️ Release failed, trying Debug..."
-            ./gradlew --no-daemon assembleDebug
-            echo "✅ Debug APK built"
-          fi
-
-      - name: 🔎 Locate APK
-        shell: bash
+      - name: Find APK
         run: |
-          set -e
-          cd "${ANDROID_ROOT}"
+          cd "$ANDROID_ROOT"
+          APK=$(ls app/build/outputs/apk/*/*.apk | head -n 1)
+          echo "APK_PATH=$APK" >> $GITHUB_ENV
 
-          APK_PATH="$(ls -1 app/build/outputs/apk/release/*.apk 2>/dev/null | head -n 1 || true)"
-          if [ -z "${APK_PATH}" ]; then
-            APK_PATH="$(ls -1 app/build/outputs/apk/debug/*.apk 2>/dev/null | head -n 1 || true)"
-          fi
-
-          if [ -z "${APK_PATH}" ]; then
-            echo "❌ Could not locate APK"
-            find app/build/outputs -maxdepth 6 -type f | head -n 200
-            exit 1
-          fi
-
-          echo "✅ APK_PATH=${APK_PATH}"
-          echo "APK_PATH=${APK_PATH}" | tee -a $GITHUB_ENV
-          ls -lh "${APK_PATH}"
-
-      - name: ☁️ Upload APK to R2 (public)
-        shell: bash
+      - name: Upload APK to R2
         run: |
-          set -e
+          KEY="android-next/${BUILD_ID}.apk"
+          ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
 
-          if [ -z "${R2_PUBLIC_BASE}" ]; then
-            echo "❌ Missing secret R2_PUBLIC_BASE (e.g. https://<your-domain>/artifact/ )"
-            exit 1
-          fi
+          export AWS_ACCESS_KEY_ID=$R2_ACCESS_KEY_ID
+          export AWS_SECRET_ACCESS_KEY=$R2_SECRET_ACCESS_KEY
+          export AWS_DEFAULT_REGION=auto
 
-          KEY="artifact-android-next/${BUILD_ID}.apk"
-          echo "Uploading to R2 key=${KEY}"
+          aws s3 cp "$APK_PATH" "s3://${R2_BUCKET}/${KEY}" \
+            --endpoint-url "$ENDPOINT" \
+            --content-type application/vnd.android.package-archive
 
-          python3 - <<'PY'
-import os, sys
-from pathlib import Path
-import boto3
+          echo "ARTIFACT_URL=${R2_PUBLIC_BASE}/${KEY}" >> $GITHUB_ENV
 
-apk_path=os.environ["APK_PATH"]
-account=os.environ["R2_ACCOUNT_ID"]
-bucket=os.environ["R2_BUCKET"]
-key=os.environ["KEY"]
-ak=os.environ["R2_ACCESS_KEY_ID"]
-sk=os.environ["R2_SECRET_ACCESS_KEY"]
-
-endpoint=f"https://{account}.r2.cloudflarestorage.com"
-s3=boto3.client(
-  "s3",
-  endpoint_url=endpoint,
-  aws_access_key_id=ak,
-  aws_secret_access_key=sk,
-  region_name="auto",
-)
-
-p=Path(apk_path)
-s3.upload_file(str(p), bucket, key, ExtraArgs={"ContentType":"application/vnd.android.package-archive"})
-print("OK")
-PY
-        env:
-          KEY: artifact-android-next/${{ github.event.client_payload.build_id }}.apk
-
-      - name: 🔗 Build public artifact URL
-        shell: bash
+      - name: Callback Worker
         run: |
-          set -e
-          KEY="artifact-android-next/${BUILD_ID}.apk"
-          ARTIFACT_URL="${R2_PUBLIC_BASE%/}/${KEY}"
-          echo "ARTIFACT_URL=${ARTIFACT_URL}" | tee -a $GITHUB_ENV
-          echo "✅ ARTIFACT_URL=${ARTIFACT_URL}"
-
-      - name: 📡 Callback Worker (mark complete)
-        shell: bash
-        run: |
-          set -e
-          if [ -z "${CALLBACK_URL}" ]; then
-            echo "❌ CALLBACK_URL missing in payload"
-            exit 1
-          fi
-
-          echo "Calling callback..."
-          curl -L --fail -X POST \
+          curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
-            -H "x-novabridge-token: ${CALLBACK_TOKEN}" \
-            -d "{\"build_id\":\"${BUILD_ID}\",\"status\":\"success\",\"artifact_url\":\"${ARTIFACT_URL}\",\"step\":\"complete\",\"step_label\":\"Complete\"}" \
-            "${CALLBACK_URL}"
-
-          echo "✅ Callback sent"
+            -H "x-novabridge-token: $CALLBACK_TOKEN" \
+            -d "{\"build_id\":\"$BUILD_ID\",\"status\":\"success\",\"artifact_url\":\"$ARTIFACT_URL\"}"
