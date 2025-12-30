@@ -1,13 +1,10 @@
-name: NovaBridge Android NEXT Cloud Build v17.2
+name: NovaBridge Android NEXT Cloud Build v17.3
 
 on:
   workflow_dispatch:
   repository_dispatch:
-    types: [novabridge_android_build_v17_next]
-
-concurrency:
-  group: novabridge-android-next-${{ github.event.client_payload.build_id || github.run_id }}
-  cancel-in-progress: false
+    types:
+      - novabridge_android_build_v17_next
 
 jobs:
   android-next:
@@ -17,145 +14,75 @@ jobs:
       BUILD_ID: ${{ github.event.client_payload.build_id }}
       ZIP_URL: ${{ github.event.client_payload.zip_url }}
       CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
+      CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
 
-      # R2 (Cloudflare) S3-compat
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       R2_BUCKET: ${{ secrets.R2_BUCKET }}
 
-      # Worker callback auth header (your Worker expects x-novabridge-token)
-      CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
-
     steps:
-      - name: 🧩 Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 🧪 Print incoming payload
-        shell: bash
+      - name: Validate payload
         run: |
           set -e
-          echo "BUILD_ID=${BUILD_ID}"
-          echo "ZIP_URL=${ZIP_URL}"
-          echo "CALLBACK_URL=${CALLBACK_URL}"
-          if [ -z "${BUILD_ID}" ] || [ -z "${ZIP_URL}" ] || [ -z "${CALLBACK_URL}" ]; then
-            echo "Missing payload fields. Ensure Worker dispatch sends build_id, zip_url, callback_url."
-            exit 1
-          fi
+          echo "BUILD_ID=$BUILD_ID"
+          echo "ZIP_URL=$ZIP_URL"
+          echo "CALLBACK_URL=$CALLBACK_URL"
+          test -n "$BUILD_ID"
+          test -n "$ZIP_URL"
+          test -n "$CALLBACK_URL"
 
-      - name: ☕ Setup Java 17
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: 🧰 Setup Android SDK
+      - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: 🧱 Setup Gradle (to bootstrap wrapper if missing)
+      - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
 
-      - name: 📥 Download ZIP from Worker
-        shell: bash
+      - name: Download ZIP
         run: |
           set -e
           mkdir -p work
-          echo "Downloading ZIP..."
-          curl -fL "${ZIP_URL}" -o work/app.zip
-          echo "Downloaded: $(ls -lh work/app.zip)"
+          curl -fL "$ZIP_URL" -o work/app.zip
 
-      - name: 📦 Extract ZIP
-        shell: bash
+      - name: Extract ZIP
         run: |
           set -e
-          rm -rf work/extracted
           mkdir -p work/extracted
           unzip -q work/app.zip -d work/extracted
-          echo "Extracted top-level:"
-          ls -la work/extracted
 
-      - name: 🔎 Locate Android project root (settings.gradle*)
-        id: locate
-        shell: bash
+      - name: Find Android root
         run: |
           set -e
-          ROOT="$(python3 - <<'PY'
-import os
-root = "work/extracted"
-hits = []
-for dirpath, dirnames, filenames in os.walk(root):
-    if "settings.gradle" in filenames or "settings.gradle.kts" in filenames:
-        hits.append(dirpath)
-# Prefer the shallowest match
-hits.sort(key=lambda p: (p.count(os.sep), len(p)))
-print(hits[0] if hits else "")
-PY
-)"
-          if [ -z "$ROOT" ]; then
-            echo "❌ Could not find settings.gradle(.kts). ZIP does not contain an Android project."
-            echo "Listing extracted tree (depth 4):"
-            find work/extracted -maxdepth 4 -type f | sed -n '1,200p'
-            exit 1
-          fi
-          echo "✅ ANDROID_ROOT=$ROOT"
+          ROOT=$(find work/extracted -name settings.gradle -o -name settings.gradle.kts | head -n 1 | xargs dirname)
           echo "ANDROID_ROOT=$ROOT" >> $GITHUB_ENV
 
-      - name: ✅ Ensure gradlew is executable
-        shell: bash
+      - name: Ensure gradlew
         run: |
           set -e
           cd "$ANDROID_ROOT"
-          if [ ! -f "./gradlew" ]; then
-            echo "❌ gradlew missing at ANDROID_ROOT=$ANDROID_ROOT"
-            ls -la
-            exit 1
-          fi
-          chmod +x ./gradlew
-          echo "✅ gradlew present + executable"
+          chmod +x gradlew
 
-      - name: 🧩 Ensure Gradle wrapper JAR exists (bootstrap if missing)
-        shell: bash
+      - name: Bootstrap Gradle wrapper
         run: |
           set -e
           cd "$ANDROID_ROOT"
-
-          WRAP_DIR="gradle/wrapper"
-          JAR="$WRAP_DIR/gradle-wrapper.jar"
-          PROPS="$WRAP_DIR/gradle-wrapper.properties"
-
-          if [ -f "$JAR" ]; then
-            echo "✅ gradle-wrapper.jar present"
-            exit 0
-          fi
-
-          echo "❌ gradle-wrapper.jar missing — bootstrapping wrapper..."
-          if [ ! -f "$PROPS" ]; then
-            echo "No gradle-wrapper.properties found; creating wrapper with Gradle"
-            gradle wrapper --gradle-version 8.7
-          else
-            # Use distributionUrl from properties if present (still generate jar)
+          if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
             gradle wrapper
           fi
 
-          if [ ! -f "$JAR" ]; then
-            echo "❌ Failed to create gradle-wrapper.jar"
-            ls -la "$WRAP_DIR" || true
-            exit 1
-          fi
-          echo "✅ Wrapper bootstrapped"
-
-      - name: 🔐 Fix Debug keystore (delete bad one + regenerate)
-        shell: bash
+      - name: Fix debug keystore
         run: |
           set -e
-          # Delete any project-bundled debug keystore that may be corrupt
-          find "$ANDROID_ROOT" -type f -name "debug.keystore" -print -delete || true
-
-          mkdir -p ~/.android
-          if [ -f ~/.android/debug.keystore ]; then
-            rm -f ~/.android/debug.keystore
-          fi
-
+          rm -f ~/.android/debug.keystore
           keytool -genkeypair -v \
             -keystore ~/.android/debug.keystore \
             -storepass android \
@@ -164,140 +91,38 @@ PY
             -keyalg RSA -keysize 2048 -validity 10000 \
             -dname "CN=Android Debug,O=Android,C=US"
 
-          echo "✅ Fresh debug.keystore generated"
-
-      - name: 🖼️ Fix missing ic_launcher_foreground (AAPT anydpi-v26)
-        shell: bash
-        run: |
-          set -e
-
-          RES_DIR="$ANDROID_ROOT/app/src/main/res"
-          if [ ! -d "$RES_DIR" ]; then
-            # Some templates use different structure; try module under 'build/app' (older worker zips)
-            if [ -d "$ANDROID_ROOT/build/app/src/main/res" ]; then
-              RES_DIR="$ANDROID_ROOT/build/app/src/main/res"
-            fi
-          fi
-
-          if [ ! -d "$RES_DIR" ]; then
-            echo "⚠️ res/ folder not found; skipping launcher fix"
-            exit 0
-          fi
-
-          echo "Checking for ic_launcher_foreground references..."
-          if ! grep -R "ic_launcher_foreground" -n "$RES_DIR/mipmap-anydpi-v26" 2>/dev/null; then
-            echo "✅ No ic_launcher_foreground referenced in mipmap-anydpi-v26"
-            exit 0
-          fi
-
-          echo "ic_launcher_foreground is referenced. Ensuring files exist..."
-
-          # pick a source icon
-          SRC=""
-          for p in \
-            "$RES_DIR/mipmap-xxxhdpi/ic_launcher.png" \
-            "$RES_DIR/mipmap-xxhdpi/ic_launcher.png" \
-            "$RES_DIR/mipmap-xhdpi/ic_launcher.png" \
-            "$RES_DIR/mipmap-hdpi/ic_launcher.png" \
-            "$RES_DIR/mipmap-mdpi/ic_launcher.png"
-          do
-            if [ -f "$p" ]; then SRC="$p"; break; fi
-          done
-
-          # if no source exists, create a minimal valid 1x1 PNG as fallback
-          if [ -z "$SRC" ]; then
-            echo "❌ Could not find ic_launcher.png to use as source. Creating 1x1 PNG fallback..."
-            mkdir -p "$RES_DIR/mipmap-mdpi"
-            printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X3XcAAAAASUVORK5CYII=' | base64 -d > "$RES_DIR/mipmap-mdpi/ic_launcher.png"
-            SRC="$RES_DIR/mipmap-mdpi/ic_launcher.png"
-          fi
-
-          # copy SRC into all densities as ic_launcher_foreground.png
-          for d in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
-            mkdir -p "$RES_DIR/mipmap-$d"
-            cp -f "$SRC" "$RES_DIR/mipmap-$d/ic_launcher_foreground.png"
-          done
-
-          echo "✅ ic_launcher_foreground.png created in mipmap-*"
-
-      - name: 🧪 Gradle Build (Release → Debug fallback)
-        shell: bash
+      - name: Build APK
         run: |
           set -e
           cd "$ANDROID_ROOT"
-
-          echo "Building Release..."
-          if ./gradlew --no-daemon clean assembleRelease; then
-            echo "✅ Release build succeeded"
-            echo "BUILD_VARIANT=release" >> $GITHUB_ENV
+          if ./gradlew assembleRelease; then
+            echo "VARIANT=release" >> $GITHUB_ENV
           else
-            echo "⚠️ Release failed — trying Debug..."
-            ./gradlew --no-daemon clean assembleDebug
-            echo "✅ Debug build succeeded"
-            echo "BUILD_VARIANT=debug" >> $GITHUB_ENV
+            ./gradlew assembleDebug
+            echo "VARIANT=debug" >> $GITHUB_ENV
           fi
 
-      - name: 🔎 Locate APK output
-        id: apk
-        shell: bash
+      - name: Locate APK
         run: |
           set -e
           cd "$ANDROID_ROOT"
-          APK="$(find . -type f -name '*.apk' | grep -E '/outputs/apk/' | head -n 1 || true)"
-          if [ -z "$APK" ]; then
-            echo "❌ APK not found. Listing outputs:"
-            find . -maxdepth 6 -type d -path '*outputs*' -print || true
-            find . -maxdepth 8 -type f -name '*.apk' -print || true
-            exit 1
-          fi
-          echo "✅ Found APK: $APK"
+          APK=$(find . -name "*.apk" | head -n 1)
           echo "APK_PATH=$APK" >> $GITHUB_ENV
 
-      - name: ☁️ Upload APK to Cloudflare R2 (public)
-        shell: bash
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      - name: Upload APK to R2
         run: |
           set -e
-
-          if [ -z "$R2_ACCOUNT_ID" ] || [ -z "$R2_BUCKET" ]; then
-            echo "❌ Missing R2_ACCOUNT_ID or R2_BUCKET secrets"
-            exit 1
-          fi
-
           ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          KEY="artifacts/android-next/${BUILD_ID}.apk"
+          KEY="android-next/${BUILD_ID}.apk"
+          aws s3 cp "$APK_PATH" "s3://${R2_BUCKET}/${KEY}" \
+            --endpoint-url "$ENDPOINT" \
+            --acl public-read
+          echo "ARTIFACT_URL=https://${R2_BUCKET}.r2.dev/${KEY}" >> $GITHUB_ENV
 
-          echo "Uploading $APK_PATH to s3://${R2_BUCKET}/${KEY}"
-          aws s3 cp "$APK_PATH" "s3://${R2_BUCKET}/${KEY}" --endpoint-url "$ENDPOINT" --acl public-read
-
-          ARTIFACT_URL="https://${R2_BUCKET}.r2.dev/${KEY}"
-          echo "✅ ARTIFACT_URL=${ARTIFACT_URL}"
-          echo "ARTIFACT_URL=${ARTIFACT_URL}" >> $GITHUB_ENV
-
-      - name: 📡 Callback Worker (mark complete)
-        shell: bash
+      - name: Callback Worker
         run: |
           set -e
-
-          echo "Calling back Worker..."
-          curl -fL -X POST "$CALLBACK_URL" \
+          curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
-            -H "x-novabridge-token: ${CALLBACK_TOKEN}" \
-            -d "$(jq -n \
-              --arg build_id "$BUILD_ID" \
-              --arg status "success" \
-              --arg artifact_url "$ARTIFACT_URL" \
-              '{build_id:$build_id,status:$status,artifact_url:$artifact_url}')"
-
-          echo "✅ Callback sent"
-
-      - name: ✅ Summary
-        shell: bash
-        run: |
-          echo "Build complete."
-          echo "BUILD_ID=${BUILD_ID}"
-          echo "VARIANT=${BUILD_VARIANT}"
-          echo "APK=${APK_PATH}"
-          echo "URL=${ARTIFACT_URL}"
+            -H "x-novabridge-token: $CALLBACK_TOKEN" \
+            -d "{\"build_id\":\"$BUILD_ID\",\"status\":\"success\",\"artifact_url\":\"$ARTIFACT_URL\"}"
