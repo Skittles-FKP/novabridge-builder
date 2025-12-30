@@ -1,18 +1,19 @@
-name: NovaBridge Android Cloud Build v16.9 NEXT
+name: NovaBridge Android Cloud Build v17 NEXT (Plugins + Firebase + AAB)
 
 on:
   workflow_dispatch:
   repository_dispatch:
-    types: [novabridge_android_build_v16_9_next]
+    types: [novabridge_android_build_v17_next]
 
 jobs:
-  android-build-next:
+  android-build-v17-next:
     runs-on: ubuntu-latest
 
     env:
       BUILD_ID: ${{ github.event.client_payload.build_id }}
       ZIP_URL: ${{ github.event.client_payload.zip_url }}
       CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
+      CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
 
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -22,26 +23,30 @@ jobs:
       ANDROID_USER_HOME: ${{ github.workspace }}/.android
       ANDROID_SDK_HOME: ${{ github.workspace }}
 
+      # Optional Release signing secrets (enable AAB)
+      ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+      ANDROID_RELEASE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+      ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+      ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+
     steps:
-      # --------------------------------------------------
-      # Checkout
-      # --------------------------------------------------
       - name: 🧩 Checkout repo
         uses: actions/checkout@v4
 
-      # --------------------------------------------------
-      # Java
-      # --------------------------------------------------
+      - name: 🧾 Print incoming payload
+        run: |
+          set -e
+          echo "BUILD_ID=$BUILD_ID"
+          echo "ZIP_URL=$ZIP_URL"
+          echo "CALLBACK_URL=$CALLBACK_URL"
+
       - name: ☕ Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      # --------------------------------------------------
-      # Gradle (system Gradle, NO wrapper)
-      # --------------------------------------------------
-      - name: 🧱 Setup Gradle
+      - name: 🧱 Setup Gradle (system Gradle, NO wrapper)
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.2.1"
@@ -52,27 +57,24 @@ jobs:
       - name: 📥 Download & extract ZIP
         run: |
           set -e
+          rm -rf build native.zip || true
           curl -fL "$ZIP_URL" -o native.zip
           unzip -q native.zip -d build
           echo "Extracted build structure:"
-          find build -maxdepth 3 -type d
+          find build -maxdepth 4 -type d
 
       # --------------------------------------------------
-      # 🔐 DEBUG KEYSTORE — FINAL FIX
-      # Template expects: build/app/debug.keystore
-      # Gradle resolves relative to working-directory: build
-      # So we MUST place keystore in BOTH paths
+      # Debug keystore (PLATINUM: ensures all paths)
       # --------------------------------------------------
       - name: 🔐 Install debug.keystore (all required paths)
         run: |
           set -e
-
           mkdir -p "$ANDROID_USER_HOME"
           mkdir -p build/app
           mkdir -p build/build/app
 
-          # Always generate a fresh, valid debug keystore
           rm -f "$ANDROID_USER_HOME/debug.keystore" || true
+
           keytool -genkeypair \
             -keystore "$ANDROID_USER_HOME/debug.keystore" \
             -storepass android \
@@ -83,18 +85,15 @@ jobs:
             -validity 10000 \
             -dname "CN=Android Debug,O=Android,C=US"
 
-          # Copy to BOTH resolution paths
           cp "$ANDROID_USER_HOME/debug.keystore" build/app/debug.keystore
           cp "$ANDROID_USER_HOME/debug.keystore" build/build/app/debug.keystore
 
-          echo "Installed debug.keystore at:"
+          echo "✅ debug.keystore installed:"
           ls -l build/app/debug.keystore
           ls -l build/build/app/debug.keystore
 
-          keytool -list -keystore build/app/debug.keystore -storepass android | head -n 20
-
       # --------------------------------------------------
-      # Install Pillow (for launcher icons)
+      # Python deps for AAPT-safe icons (PLATINUM fix)
       # --------------------------------------------------
       - name: 🐍 Install Python deps
         run: |
@@ -103,9 +102,12 @@ jobs:
           python3 -m pip install pillow
 
       # --------------------------------------------------
-      # Generate AAPT-SAFE launcher icons
+      # Generate AAPT-safe launcher icons
+      # Fixes:
+      # - ic_launcher_foreground missing
+      # - file failed to compile (invalid png)
       # --------------------------------------------------
-      - name: 🎨 Generate launcher icons
+      - name: 🎨 Generate launcher icons (AAPT-safe)
         run: |
           set -e
           python3 - <<'PY'
@@ -114,33 +116,70 @@ jobs:
 
           res = "build/app/src/main/res"
           mipmaps = [
-            "mipmap-mdpi",
-            "mipmap-hdpi",
-            "mipmap-xhdpi",
-            "mipmap-xxhdpi",
-            "mipmap-xxxhdpi"
+            ("mipmap-mdpi", 48),
+            ("mipmap-hdpi", 72),
+            ("mipmap-xhdpi", 96),
+            ("mipmap-xxhdpi", 144),
+            ("mipmap-xxxhdpi", 192),
           ]
 
-          img = Image.new("RGBA", (48, 48), (63, 81, 181, 255))
+          def make(size):
+            return Image.new("RGBA", (size, size), (63, 81, 181, 255))
 
-          for m in mipmaps:
-            d = os.path.join(res, m)
+          for folder, px in mipmaps:
+            d = os.path.join(res, folder)
             os.makedirs(d, exist_ok=True)
-            img.save(os.path.join(d, "ic_launcher.png"))
-            img.save(os.path.join(d, "ic_launcher_round.png"))
-            img.save(os.path.join(d, "ic_launcher_foreground.png"))
+            img = make(px)
+            img.save(os.path.join(d, "ic_launcher.png"), format="PNG")
+            img.save(os.path.join(d, "ic_launcher_round.png"), format="PNG")
+            img.save(os.path.join(d, "ic_launcher_foreground.png"), format="PNG")
 
-          print("Launcher icons generated successfully.")
+          print("✅ Launcher icons generated.")
           PY
 
       # --------------------------------------------------
-      # BUILD APK (system Gradle)
+      # Prepare Release signing (optional) + expose env for Gradle signingConfigs.release
       # --------------------------------------------------
-      - name: 🏗 Build APK
+      - name: 🔐 Prepare release signing (optional)
+        id: release_sign
+        run: |
+          set -e
+          if [ -n "${ANDROID_RELEASE_KEYSTORE_BASE64}" ] && [ -n "${ANDROID_RELEASE_KEYSTORE_PASSWORD}" ] && [ -n "${ANDROID_RELEASE_KEY_ALIAS}" ] && [ -n "${ANDROID_RELEASE_KEY_PASSWORD}" ]; then
+            echo "✅ Release signing secrets found"
+            mkdir -p build/app
+            echo "${ANDROID_RELEASE_KEYSTORE_BASE64}" | tr -d '\n\r ' | base64 --decode > build/app/release.keystore
+
+            echo "NOVABRIDGE_RELEASE_KEYSTORE_PATH=release.keystore" >> $GITHUB_ENV
+            echo "NOVABRIDGE_RELEASE_KEYSTORE_PASSWORD=${ANDROID_RELEASE_KEYSTORE_PASSWORD}" >> $GITHUB_ENV
+            echo "NOVABRIDGE_RELEASE_KEY_ALIAS=${ANDROID_RELEASE_KEY_ALIAS}" >> $GITHUB_ENV
+            echo "NOVABRIDGE_RELEASE_KEY_PASSWORD=${ANDROID_RELEASE_KEY_PASSWORD}" >> $GITHUB_ENV
+
+            echo "release_enabled=true" >> $GITHUB_OUTPUT
+            ls -lh build/app/release.keystore
+          else
+            echo "ℹ️ Release signing secrets missing — AAB will be skipped."
+            echo "release_enabled=false" >> $GITHUB_OUTPUT
+          fi
+
+      # --------------------------------------------------
+      # Build APK (always) using system Gradle
+      # --------------------------------------------------
+      - name: 🏗 Build APK (Release or Debug fallback)
         working-directory: build
         run: |
           set -e
+          gradle --version
           gradle assembleRelease || gradle assembleDebug
+
+      # --------------------------------------------------
+      # Build AAB only if release signing enabled
+      # --------------------------------------------------
+      - name: 📦 Build AAB (bundleRelease)
+        if: steps.release_sign.outputs.release_enabled == 'true'
+        working-directory: build
+        run: |
+          set -e
+          gradle bundleRelease
 
       # --------------------------------------------------
       # Locate APK
@@ -153,11 +192,38 @@ jobs:
           APK=$(find app/build/outputs/apk -type f -name "*.apk" | head -n 1)
           if [ -z "$APK" ]; then
             echo "❌ APK not found"
-            find app/build/outputs -type f
+            find app/build/outputs -type f || true
             exit 1
           fi
           echo "apk_path=$APK" >> $GITHUB_OUTPUT
           echo "Found APK: $APK"
+
+      # Locate AAB (optional)
+      - name: 🔍 Locate AAB
+        id: find_aab
+        if: steps.release_sign.outputs.release_enabled == 'true'
+        working-directory: build
+        run: |
+          set -e
+          AAB=$(find app/build/outputs/bundle -type f -name "*.aab" | head -n 1)
+          if [ -z "$AAB" ]; then
+            echo "❌ AAB not found"
+            find app/build/outputs -type f || true
+            exit 1
+          fi
+          echo "aab_path=$AAB" >> $GITHUB_OUTPUT
+          echo "Found AAB: $AAB"
+
+      # --------------------------------------------------
+      # Ensure AWS CLI exists
+      # --------------------------------------------------
+      - name: ☁️ Ensure AWS CLI
+        run: |
+          set -e
+          if ! command -v aws >/dev/null 2>&1; then
+            python3 -m pip install awscli
+          fi
+          aws --version
 
       # --------------------------------------------------
       # Upload APK to R2
@@ -166,22 +232,46 @@ jobs:
         run: |
           set -e
           APK="build/${{ steps.find_apk.outputs.apk_path }}"
-
           AWS_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID}" \
           AWS_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY}" \
           aws s3 cp "$APK" "s3://${R2_BUCKET}/apks/${BUILD_ID}.apk" \
             --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
             --region auto
 
-          echo "APK uploaded to R2"
+      # Upload AAB to R2 (optional)
+      - name: ☁️ Upload AAB to R2
+        if: steps.release_sign.outputs.release_enabled == 'true'
+        run: |
+          set -e
+          AAB="build/${{ steps.find_aab.outputs.aab_path }}"
+          AWS_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID}" \
+          AWS_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY}" \
+          aws s3 cp "$AAB" "s3://${R2_BUCKET}/aabs/${BUILD_ID}.aab" \
+            --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
+            --region auto
 
       # --------------------------------------------------
-      # Callback to Worker
+      # Callback to Worker v17 (NO hardcode — derive from CALLBACK_URL origin)
       # --------------------------------------------------
-      - name: ✅ Notify Worker
+      - name: ✅ Notify Worker (APK + optional AAB)
         if: success() && env.CALLBACK_URL != ''
         run: |
           set -e
-          curl -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -d "{\"build_id\":\"$BUILD_ID\",\"status\":\"success\",\"artifact_url\":\"https://novabridge-build-worker-next.novabridge.workers.dev/apk/$BUILD_ID\"}"
+
+          WORKER_BASE="$(echo "$CALLBACK_URL" | sed -E 's#(https?://[^/]+).*#\1#')"
+          echo "Derived WORKER_BASE=$WORKER_BASE"
+
+          APK_URL="${WORKER_BASE}/apk/${BUILD_ID}"
+          AAB_URL="${WORKER_BASE}/aab/${BUILD_ID}"
+
+          if [ "${{ steps.release_sign.outputs.release_enabled }}" = "true" ]; then
+            curl -f -X POST "$CALLBACK_URL" \
+              -H "Content-Type: application/json" \
+              -H "x-novabridge-token: ${CALLBACK_TOKEN}" \
+              -d "{\"build_id\":\"$BUILD_ID\",\"status\":\"success\",\"artifact_apk_url\":\"$APK_URL\",\"artifact_aab_url\":\"$AAB_URL\"}"
+          else
+            curl -f -X POST "$CALLBACK_URL" \
+              -H "Content-Type: application/json" \
+              -H "x-novabridge-token: ${CALLBACK_TOKEN}" \
+              -d "{\"build_id\":\"$BUILD_ID\",\"status\":\"success\",\"artifact_apk_url\":\"$APK_URL\"}"
+          fi
