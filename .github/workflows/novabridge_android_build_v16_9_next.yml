@@ -1,258 +1,196 @@
-name: NovaBridge Android NEXT Cloud Build v17
+name: NovaBridge Android Cloud Build v17 NEXT
 
 on:
   workflow_dispatch:
   repository_dispatch:
-    types: [novabridge_android_build_v17_next]
+    types:
+      - novabridge_android_build_v17_next
 
 jobs:
-  android-next-build:
+  android-build:
     runs-on: ubuntu-latest
 
     env:
       BUILD_ID: ${{ github.event.client_payload.build_id }}
       ZIP_URL: ${{ github.event.client_payload.zip_url }}
       CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
-
-      # R2
-      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      R2_BUCKET: ${{ secrets.R2_BUCKET }}
-
-      # Worker callback auth (must match what Worker expects)
-      CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
-
-      # Gradle
-      GRADLE_VERSION: "8.7"
+      ANDROID_ROOT: work/extracted
+      JAVA_HOME: /usr/lib/jvm/temurin-17-jdk-amd64
 
     steps:
-      - name: 🧩 Checkout repo
+      # ------------------------------------------------------------
+      # 1️⃣ Checkout
+      # ------------------------------------------------------------
+      - name: 🧩 Checkout repository
         uses: actions/checkout@v4
 
-      - name: 🧪 Print incoming payload
-        shell: bash
+      # ------------------------------------------------------------
+      # 2️⃣ Validate incoming payload (debug safety)
+      # ------------------------------------------------------------
+      - name: 🔍 Validate dispatch payload
         run: |
+          set -e
           echo "BUILD_ID=$BUILD_ID"
           echo "ZIP_URL=$ZIP_URL"
-          echo "CALLBACK_URL=$CALLBACK_URL"
+          if [ -z "$ZIP_URL" ]; then
+            echo "❌ ZIP_URL missing"
+            exit 1
+          fi
 
+      # ------------------------------------------------------------
+      # 3️⃣ Setup Java
+      # ------------------------------------------------------------
       - name: ☕ Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: 17
 
-      - name: 📥 Download ZIP
-        shell: bash
+      # ------------------------------------------------------------
+      # 4️⃣ Download ZIP from Worker
+      # ------------------------------------------------------------
+      - name: 📥 Download Android project ZIP
         run: |
           set -e
           mkdir -p work
-          cd work
-          echo "Downloading ZIP..."
-          curl -L --fail "$ZIP_URL" -o app.zip
-          echo "ZIP size:"
-          ls -lah app.zip
+          curl -L "$ZIP_URL" -o work/project.zip
+          unzip -q work/project.zip -d work/extracted
+          echo "✅ ZIP extracted"
 
-      - name: 📦 Extract ZIP
-        shell: bash
+      # ------------------------------------------------------------
+      # 5️⃣ Ensure Gradle Wrapper (NON-NEGOTIABLE)
+      # ------------------------------------------------------------
+      - name: 🧱 Ensure Gradle wrapper
         run: |
           set -e
-          cd work
-          unzip -q app.zip -d extracted
-          echo "Extracted top-level:"
-          ls -la extracted
+          cd "$ANDROID_ROOT"
 
-      - name: 🔎 Locate Android project root
-        id: locate
-        shell: bash
-        run: |
-          set -e
-          cd work/extracted
-
-          # Try common roots first
-          if [ -f "gradlew" ] && [ -d "app" ]; then
-            echo "ANDROID_ROOT=$PWD" >> $GITHUB_ENV
-            exit 0
-          fi
-
-          # Otherwise find a gradlew
-          ROOT="$(find . -maxdepth 5 -name gradlew -type f | head -n 1 | xargs -I{} dirname {})"
-          if [ -z "$ROOT" ]; then
-            echo "❌ Could not find gradlew in extracted ZIP."
-            find . -maxdepth 4 -type f | head -n 200
+          if [ ! -f gradlew ]; then
+            echo "❌ gradlew missing"
             exit 1
           fi
 
-          ROOT="$(cd "$ROOT" && pwd)"
-          echo "Found ANDROID_ROOT=$ROOT"
-          echo "ANDROID_ROOT=$ROOT" >> $GITHUB_ENV
+          chmod +x gradlew
 
-      - name: ✅ Ensure gradlew executable
-        shell: bash
-        run: |
-          set -e
-          cd "$ANDROID_ROOT"
-          chmod +x ./gradlew
-          echo "✅ gradlew present and executable"
-
-      - name: 🧰 Ensure Gradle wrapper jar exists (generate if missing)
-        shell: bash
-        run: |
-          set -e
-          cd "$ANDROID_ROOT"
-
-          WRAPPER_JAR="gradle/wrapper/gradle-wrapper.jar"
-          if [ -f "$WRAPPER_JAR" ]; then
-            echo "✅ gradle-wrapper.jar present"
-            exit 0
+          if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
+            echo "⬇️ Downloading gradle-wrapper.jar"
+            mkdir -p gradle/wrapper
+            curl -L https://services.gradle.org/distributions/gradle-8.6-bin.zip -o /tmp/gradle.zip
+            unzip -q /tmp/gradle.zip -d /tmp
+            cp /tmp/gradle-8.6/lib/gradle-wrapper.jar gradle/wrapper/
           fi
 
-          echo "⚠️ gradle-wrapper.jar missing — generating wrapper using Gradle ${GRADLE_VERSION}"
+          echo "✅ Gradle wrapper ready"
 
-          cd /tmp
-          curl -L --fail "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -o gradle.zip
-          unzip -q gradle.zip
-          export GRADLE_BIN="/tmp/gradle-${GRADLE_VERSION}/bin/gradle"
-
-          cd "$ANDROID_ROOT"
-          "$GRADLE_BIN" wrapper --gradle-version "$GRADLE_VERSION"
-
-          if [ ! -f "$WRAPPER_JAR" ]; then
-            echo "❌ Still missing gradle-wrapper.jar after generation."
-            ls -la gradle/wrapper || true
-            exit 1
-          fi
-
-          echo "✅ Wrapper generated"
-
-      - name: 🔐 Ensure debug.keystore exists
+      # ------------------------------------------------------------
+      # 6️⃣ FIX ANDROID ADAPTIVE ICONS (ROOT CAUSE FIX)
+      # ------------------------------------------------------------
+      - name: 🎨 Fix adaptive launcher icons (NEXT)
         shell: bash
         run: |
           set -e
           cd "$ANDROID_ROOT"
 
-          # common debug keystore location some templates use
-          KEYSTORE_PATH="app/debug.keystore"
-          if [ -f "$KEYSTORE_PATH" ]; then
-            echo "✅ debug.keystore exists"
-            exit 0
-          fi
+          RES="app/src/main/res"
 
-          echo "Generating debug.keystore..."
-          keytool -genkeypair \
-            -keystore "$KEYSTORE_PATH" \
-            -storepass android \
-            -keypass android \
-            -alias androiddebugkey \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000 \
-            -dname "CN=Android Debug,O=Android,C=US"
+          mkdir -p "$RES/drawable"
+          mkdir -p "$RES/values"
+          mkdir -p "$RES/mipmap-anydpi-v26"
 
-          test -f "$KEYSTORE_PATH"
-          echo "✅ debug.keystore generated at $KEYSTORE_PATH"
+          # Background color
+          cat > "$RES/values/ic_launcher_background.xml" <<'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ic_launcher_background">#121212</color>
+</resources>
+EOF
 
-      - name: 🧩 Patch deps for NEXT plugins (Biometric + Location) if plugin sources exist
-        shell: bash
+          # Foreground drawable
+          cat > "$RES/drawable/ic_launcher_foreground.xml" <<'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group android:scaleX="0.8"
+           android:scaleY="0.8"
+           android:translateX="10.8"
+           android:translateY="10.8">
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M54,0L108,54L54,108L0,54Z"/>
+    </group>
+</vector>
+EOF
+
+          # Adaptive icons
+          for ICON in ic_launcher ic_launcher_round; do
+            cat > "$RES/mipmap-anydpi-v26/${ICON}.xml" <<'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background"/>
+    <foreground android:drawable="@drawable/ic_launcher_foreground"/>
+</adaptive-icon>
+EOF
+          done
+
+          echo "✅ Adaptive icons fixed"
+
+      # ------------------------------------------------------------
+      # 7️⃣ Build APK (Debug → Release fallback)
+      # ------------------------------------------------------------
+      - name: 🏗️ Build APK
         run: |
           set -e
           cd "$ANDROID_ROOT"
 
-          PLUGINS_DIR="app/src/main/java"
-          HAS_LOCATION="$(grep -R --line-number "com.google.android.gms.location" "$PLUGINS_DIR" 2>/dev/null | head -n 1 || true)"
-          HAS_BIOMETRIC="$(grep -R --line-number "androidx.biometric" "$PLUGINS_DIR" 2>/dev/null | head -n 1 || true)"
+          ./gradlew assembleDebug || ./gradlew assembleRelease
 
-          if [ -z "$HAS_LOCATION" ] && [ -z "$HAS_BIOMETRIC" ]; then
-            echo "No Location/Biometric imports found — skipping dependency patch."
-            exit 0
-          fi
-
-          APP_GRADLE="app/build.gradle"
-          if [ ! -f "$APP_GRADLE" ]; then
-            echo "❌ app/build.gradle not found at $ANDROID_ROOT/app/build.gradle"
-            ls -la app || true
-            exit 1
-          fi
-
-          echo "Patching $APP_GRADLE for plugin deps..."
-
-          # Ensure dependencies block exists; then append implementations if not present
-          if ! grep -q "dependencies" "$APP_GRADLE"; then
-            echo "❌ No dependencies block found in app/build.gradle"
-            exit 1
-          fi
-
-          if [ -n "$HAS_LOCATION" ] && ! grep -q "play-services-location" "$APP_GRADLE"; then
-            sed -i '/dependencies\s*{/a\    implementation "com.google.android.gms:play-services-location:21.3.0"' "$APP_GRADLE"
-            echo "✅ Added play-services-location"
-          fi
-
-          if [ -n "$HAS_BIOMETRIC" ] && ! grep -q "androidx.biometric:biometric" "$APP_GRADLE"; then
-            sed -i '/dependencies\s*{/a\    implementation "androidx.biometric:biometric:1.1.0"' "$APP_GRADLE"
-            echo "✅ Added androidx.biometric"
-          fi
-
-      - name: 🏗️ Build APK (Release → Debug fallback)
-        shell: bash
-        run: |
-          set -e
-          cd "$ANDROID_ROOT"
-
-          echo "Running assembleRelease..."
-          if ./gradlew --no-daemon assembleRelease; then
-            echo "✅ Release build ok"
-          else
-            echo "⚠️ Release failed — falling back to Debug"
-            ./gradlew --no-daemon assembleDebug
-          fi
-
+      # ------------------------------------------------------------
+      # 8️⃣ Locate APK
+      # ------------------------------------------------------------
       - name: 🔎 Locate APK
-        shell: bash
         run: |
           set -e
           cd "$ANDROID_ROOT"
 
-          APK_PATH="$(find . -type f \( -name "*release*.apk" -o -name "*debug*.apk" \) | head -n 1)"
-          if [ -z "$APK_PATH" ]; then
-            echo "❌ No APK found."
-            find . -maxdepth 5 -type f | grep -i "\.apk" || true
+          APK=$(find app/build/outputs -name "*.apk" | head -n 1)
+          if [ -z "$APK" ]; then
+            echo "❌ APK not found"
             exit 1
           fi
 
-          echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
-          echo "✅ Found APK at $APK_PATH"
+          echo "APK_PATH=$APK" >> $GITHUB_ENV
+          echo "✅ APK found at $APK"
 
+      # ------------------------------------------------------------
+      # 9️⃣ Upload APK to R2
+      # ------------------------------------------------------------
       - name: ☁️ Upload APK to R2
-        shell: bash
         run: |
           set -e
+          FILE="novabridge-${BUILD_ID}.apk"
+          aws s3 cp "$APK_PATH" "s3://${{ secrets.R2_BUCKET }}/android/${FILE}" \
+            --endpoint-url "https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com" \
+            --region auto \
+            --no-progress
 
-          export AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID"
-          export AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY"
-          export AWS_DEFAULT_REGION="auto"
+          echo "ARTIFACT_URL=https://${{ secrets.R2_PUBLIC_HOST }}/android/${FILE}" >> $GITHUB_ENV
+          echo "✅ APK uploaded"
 
-          DEST_KEY="artifacts/android-next/${BUILD_ID}/app.apk"
-          ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-
-          echo "Uploading to s3://${R2_BUCKET}/${DEST_KEY}"
-          aws s3 cp "$ANDROID_ROOT/$APK_PATH" "s3://${R2_BUCKET}/${DEST_KEY}" --endpoint-url "$ENDPOINT"
-
-          echo "R2_KEY=$DEST_KEY" >> $GITHUB_ENV
-          echo "✅ Upload complete"
-
-      - name: 📡 Callback to Worker (success)
-        shell: bash
+      # ------------------------------------------------------------
+      # 🔟 Callback Worker (FINAL STATE FLIP)
+      # ------------------------------------------------------------
+      - name: 📡 Callback Worker
         run: |
           set -e
-
-          # Your Worker should map this key to a public download URL (or return direct R2 URL if you do that)
-          ARTIFACT_HINT="${R2_KEY}"
-
-          echo "Calling callback..."
-          curl -sS -X POST "$CALLBACK_URL" \
+          curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
-            -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d "{\"build_id\":\"$BUILD_ID\",\"status\":\"success\",\"artifact_key\":\"$ARTIFACT_HINT\"}"
+            -d "{
+              \"build_id\": \"$BUILD_ID\",
+              \"status\": \"success\",
+              \"artifact_url\": \"$ARTIFACT_URL\"
+            }"
 
-          echo "✅ Callback sent"
+          echo "🎉 Worker callback complete"
