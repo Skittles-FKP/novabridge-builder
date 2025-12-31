@@ -1,7 +1,7 @@
 name: NovaBridge Android Cloud Build v17 (EMERALD FINAL LOCKED)
 
 on:
-  # 🔒 DO NOT CHANGE — Worker dispatch trigger
+  # 🔒 Worker-triggered build (DO NOT CHANGE)
   repository_dispatch:
     types: [novabridge_android_build_v17_next]
 
@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@v4
 
       # ------------------------------------------------------------
-      # Java 17 — required for AGP 8.x
+      # Java 17 (AGP 8.x requirement)
       # ------------------------------------------------------------
       - name: ☕ Setup Java 17
         uses: actions/setup-java@v4
@@ -33,7 +33,7 @@ jobs:
           java-version: 17
 
       # ------------------------------------------------------------
-      # 🔒 CRITICAL FIX — REAL, PUBLISHED GRADLE VERSION
+      # 🔒 GRADLE — PUBLISHED VERSION ONLY
       # ------------------------------------------------------------
       - name: 🔧 Install Gradle 8.2.1 (AGP-safe, published)
         run: |
