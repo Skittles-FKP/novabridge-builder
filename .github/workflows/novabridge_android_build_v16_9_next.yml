@@ -24,7 +24,7 @@ jobs:
       # ------------------------------------------------------------
       # Java 17
       # ------------------------------------------------------------
-      - name: ☕ Setup Java 17
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -33,26 +33,23 @@ jobs:
       # ------------------------------------------------------------
       # System deps
       # ------------------------------------------------------------
-      - name: 🧰 Install ImageMagick
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y imagemagick
+      - name: Install ImageMagick
+        run: sudo apt-get update && sudo apt-get install -y imagemagick
 
       # ------------------------------------------------------------
-      # Gradle (AGP-safe)
+      # Gradle
       # ------------------------------------------------------------
-      - name: 🔧 Install Gradle 8.2.1
+      - name: Install Gradle
         run: |
-          GRADLE_VERSION=8.2.1
-          curl -fL https://downloads.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip -o gradle.zip
+          curl -fL https://downloads.gradle.org/distributions/gradle-8.2.1-bin.zip -o gradle.zip
           unzip -q gradle.zip
-          echo "$PWD/gradle-${GRADLE_VERSION}/bin" >> $GITHUB_PATH
+          echo "$PWD/gradle-8.2.1/bin" >> $GITHUB_PATH
           gradle --version
 
       # ------------------------------------------------------------
       # Download Android project ZIP
       # ------------------------------------------------------------
-      - name: 📥 Download Android project ZIP
+      - name: Download project
         run: |
           curl -L "$ZIP_URL" -o project.zip
           unzip -q project.zip -d extracted
@@ -60,22 +57,21 @@ jobs:
       # ------------------------------------------------------------
       # Android SDK
       # ------------------------------------------------------------
-      - name: 📦 Setup Android SDK
+      - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
       # ------------------------------------------------------------
-      # Adaptive icon foreground (AAPT-safe)
+      # Adaptive icon foreground
       # ------------------------------------------------------------
-      - name: 🎨 Generate ic_launcher_foreground.png
+      - name: Generate icon
         run: |
-          ICON_DIR="extracted/app/src/main/res/mipmap-mdpi"
-          mkdir -p "$ICON_DIR"
-          convert -size 48x48 xc:none "$ICON_DIR/ic_launcher_foreground.png"
+          mkdir -p extracted/app/src/main/res/mipmap-mdpi
+          convert -size 48x48 xc:none extracted/app/src/main/res/mipmap-mdpi/ic_launcher_foreground.png
 
       # ------------------------------------------------------------
-      # Generate debug keystore
+      # Debug keystore (standard Android debug signing)
       # ------------------------------------------------------------
-      - name: 🔑 Generate debug keystore
+      - name: Generate debug keystore
         run: |
           mkdir -p ~/.android
           keytool -genkeypair \
@@ -89,75 +85,29 @@ jobs:
             -dname "CN=Android Debug,O=Android,C=US"
 
       # ------------------------------------------------------------
-      # 🔐 Enforce signing config (NO heredoc)
+      # Build APKs (debug signing used for release)
       # ------------------------------------------------------------
-      - name: 🔐 Enforce signing config
-        run: |
-          GRADLE_FILE="extracted/app/build.gradle"
-
-          grep -q "signingConfigs" "$GRADLE_FILE" || \
-          sed -i '/android {/a\
-      signingConfigs {\
-          debug {\
-              storeFile file(System.getProperty("user.home") + "/.android/debug.keystore")\
-              storePassword "android"\
-              keyAlias "androiddebugkey"\
-              keyPassword "android"\
-          }\
-          release {\
-              storeFile file(System.getProperty("user.home") + "/.android/debug.keystore")\
-              storePassword "android"\
-              keyAlias "androiddebugkey"\
-              keyPassword "android"\
-          }\
-      }\
-      buildTypes {\
-          debug { signingConfig signingConfigs.debug }\
-          release { signingConfig signingConfigs.release }\
-      }' "$GRADLE_FILE"
-
-      # ------------------------------------------------------------
-      # Inject plugin dependencies
-      # ------------------------------------------------------------
-      - name: 🧩 Inject plugin dependencies
-        run: |
-          GRADLE_FILE="extracted/app/build.gradle"
-
-          grep -q "play-services-location" "$GRADLE_FILE" || \
-            sed -i '/dependencies {/a\    implementation "com.google.android.gms:play-services-location:21.0.1"' "$GRADLE_FILE"
-
-          grep -q "androidx.biometric" "$GRADLE_FILE" || \
-            sed -i '/dependencies {/a\    implementation "androidx.biometric:biometric:1.2.0-alpha05"' "$GRADLE_FILE"
-
-      # ------------------------------------------------------------
-      # Build APKs
-      # ------------------------------------------------------------
-      - name: 🏗️ Build APKs
+      - name: Build APKs
         working-directory: extracted
         run: |
-          gradle assembleRelease --no-daemon
+          gradle assembleRelease --no-daemon -Pandroid.injected.signing.store.file=$HOME/.android/debug.keystore
           gradle assembleDebug --no-daemon
 
       # ------------------------------------------------------------
       # Normalize APK paths
       # ------------------------------------------------------------
-      - name: ✅ Normalize APK paths
+      - name: Normalize APKs
         run: |
-          REAL_DEBUG_APK=$(find extracted/app/build/outputs/apk/debug -name "*.apk" | head -n 1)
-          REAL_RELEASE_APK=$(find extracted/app/build/outputs/apk/release -name "*.apk" | head -n 1)
-
           mkdir -p app/build/outputs/apk/debug
           mkdir -p app/build/outputs/apk/release
-
-          cp "$REAL_DEBUG_APK" app/build/outputs/apk/debug/app-debug.apk
-          cp "$REAL_RELEASE_APK" app/build/outputs/apk/release/app-release.apk
-
+          cp extracted/app/build/outputs/apk/debug/*.apk app/build/outputs/apk/debug/app-debug.apk
+          cp extracted/app/build/outputs/apk/release/*.apk app/build/outputs/apk/release/app-release.apk
           echo "CANON_RELEASE_APK=app/build/outputs/apk/release/app-release.apk" >> $GITHUB_ENV
 
       # ------------------------------------------------------------
-      # Upload Release APK
+      # Upload artifact
       # ------------------------------------------------------------
-      - name: 📦 Upload Release APK
+      - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
           name: app-release-${{ github.event.client_payload.build_id }}
@@ -166,7 +116,7 @@ jobs:
       # ------------------------------------------------------------
       # Callback
       # ------------------------------------------------------------
-      - name: ☁️ Notify Worker
+      - name: Notify Worker
         run: |
           curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
@@ -176,5 +126,5 @@ jobs:
       # ------------------------------------------------------------
       # Done
       # ------------------------------------------------------------
-      - name: ✅ Build completed
-        run: echo "Android EMERALD build completed successfully"
+      - name: Done
+        run: echo "Android EMERALD build completed"
