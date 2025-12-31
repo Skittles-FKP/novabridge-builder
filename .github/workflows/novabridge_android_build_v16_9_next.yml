@@ -63,65 +63,12 @@ jobs:
           echo "ANDROID_ROOT=$ROOT" >> $GITHUB_ENV
 
       # ============================================================
-      # 🔒 EMERALD UPGRADE: FORCE GRADLE 8.2.2 (NO REGRESSIONS)
+      # ✅ EMERALD FIX: GitHub-native Gradle install (403-safe)
       # ============================================================
-      - name: 🔧 Install pinned Gradle (EMERALD safe)
-        run: |
-          set -e
-          curl -sSL https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip -o gradle.zip
-          unzip -q gradle.zip
-          echo "$PWD/gradle-${GRADLE_VERSION}/bin" >> $GITHUB_PATH
-          gradle --version
-
-      # ============================================================
-      # ✅ NEW (ADDITIVE): Maven Central 403 FIX
-      # Force Gradle to use repo1.maven.org instead of repo.maven.apache.org
-      # via init script (no project rewrite; applies to builds + plugins)
-      # ============================================================
-      - name: 🌐 Enforce Maven Central mirror (repo1) to bypass 403
-        run: |
-          set -e
-          mkdir -p ~/.gradle/init.d
-          cat > ~/.gradle/init.d/novabridge-maven-mirror.gradle <<'GRADLE'
-          // NovaBridge EMERALD: bypass Maven Central 403 on repo.maven.apache.org
-          // Forces repo1.maven.org for both dependency + plugin resolution
-          gradle.settingsEvaluated { settings ->
-            try {
-              settings.pluginManagement.repositories.clear()
-              settings.pluginManagement.repositories {
-                google()
-                maven { url = uri("https://repo1.maven.org/maven2") }
-                gradlePluginPortal()
-              }
-            } catch (ignored) {}
-
-            try {
-              settings.dependencyResolutionManagement.repositories.clear()
-              settings.dependencyResolutionManagement.repositories {
-                google()
-                maven { url = uri("https://repo1.maven.org/maven2") }
-              }
-            } catch (ignored) {}
-          }
-
-          allprojects {
-            repositories {
-              google()
-              maven { url = uri("https://repo1.maven.org/maven2") }
-            }
-          }
-          GRADLE
-
-          echo "Init script installed:"
-          ls -la ~/.gradle/init.d
-          echo "Quick connectivity probe:"
-          curl -I -sS https://repo1.maven.org/maven2/ | head -n 5 || true
-          curl -I -sS https://repo.maven.apache.org/maven2/ | head -n 5 || true
-
-      # ✅ Gradle dependency cache ONLY after ZIP exists
-      - name: 🧱 Setup Gradle (post-ZIP)
+      - name: 🧱 Setup Gradle 8.2.2 (EMERALD safe)
         uses: gradle/actions/setup-gradle@v3
         with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
           build-root-directory: ${{ env.ANDROID_ROOT }}
 
       - name: 🔧 Ensure gradlew executable
@@ -151,7 +98,7 @@ jobs:
             -keyalg RSA -keysize 2048 -validity 10000 \
             -dname "CN=Android Debug,O=Android,C=US"
 
-      # 🧯 EMERALD GRADLE SAFE MODE (CRITICAL)
+      # 🧯 EMERALD GRADLE SAFE MODE (UNCHANGED)
       - name: 🧯 Enforce Gradle EMERALD safe mode
         run: |
           echo "ORG_GRADLE_CONFIGURATION_CACHE=false" >> $GITHUB_ENV
