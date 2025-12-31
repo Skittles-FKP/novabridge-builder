@@ -31,13 +31,13 @@ jobs:
           java-version: 17
 
       # ------------------------------------------------------------
-      # System deps
+      # System dependencies
       # ------------------------------------------------------------
-      - name: Install ImageMagick
+      - name: Install system deps
         run: sudo apt-get update && sudo apt-get install -y imagemagick
 
       # ------------------------------------------------------------
-      # Gradle
+      # Gradle 8.2.1
       # ------------------------------------------------------------
       - name: Install Gradle
         run: |
@@ -61,15 +61,16 @@ jobs:
         uses: android-actions/setup-android@v3
 
       # ------------------------------------------------------------
-      # Adaptive icon foreground (ensures resource exists)
+      # Ensure adaptive icon foreground exists
       # ------------------------------------------------------------
-      - name: Generate icon
+      - name: Generate adaptive icon
         run: |
           mkdir -p extracted/app/src/main/res/mipmap-mdpi
-          convert -size 48x48 xc:none extracted/app/src/main/res/mipmap-mdpi/ic_launcher_foreground.png
+          convert -size 48x48 xc:none \
+            extracted/app/src/main/res/mipmap-mdpi/ic_launcher_foreground.png
 
       # ------------------------------------------------------------
-      # Debug keystore (standard signing)
+      # Debug keystore (standard Android)
       # ------------------------------------------------------------
       - name: Generate debug keystore
         run: |
@@ -85,36 +86,49 @@ jobs:
             -dname "CN=Android Debug,O=Android,C=US"
 
       # ------------------------------------------------------------
-      # ✅ FIX: Deterministically inject required plugin dependencies
-      # (No init scripts. No heredocs. Idempotent.)
+      # 🔒 FIX: Deterministic plugin dependency injection
       # ------------------------------------------------------------
-      - name: Inject required plugin deps (deterministic)
+      - name: Inject required plugin dependencies
         run: |
-          python -c "import pathlib, re; \
-p1=pathlib.Path('extracted/app/build.gradle'); \
-p2=pathlib.Path('extracted/app/build.gradle.kts'); \
-path = p1 if p1.exists() else p2 if p2.exists() else None; \
-assert path is not None, 'No app/build.gradle(.kts) found'; \
-s=path.read_text(encoding='utf-8'); \
-deps_groovy=['implementation \"com.google.android.gms:play-services-location:21.0.1\"', \
-             'implementation \"androidx.biometric:biometric:1.2.0-alpha05\"']; \
-deps_kts=['implementation(\"com.google.android.gms:play-services-location:21.0.1\")', \
-          'implementation(\"androidx.biometric:biometric:1.2.0-alpha05\")']; \
-is_kts = path.name.endswith('.kts'); \
-need = deps_kts if is_kts else deps_groovy; \
-for line in need: \
-  if line not in s: \
-    m=re.search(r'dependencies\\s*\\{', s); \
-    assert m, 'No dependencies { } block found'; \
-    i=m.end(); \
-    s=s[:i] + ('\\n    ' + line) + s[i:]; \
-path.write_text(s, encoding='utf-8'); \
-print('Patched', path, '-> added missing deps (if any)')"
+          python - <<'PY'
+          import pathlib, re
+
+          p_groovy = pathlib.Path("extracted/app/build.gradle")
+          p_kts = pathlib.Path("extracted/app/build.gradle.kts")
+
+          path = p_groovy if p_groovy.exists() else p_kts if p_kts.exists() else None
+          if not path:
+              raise SystemExit("❌ app/build.gradle(.kts) not found")
+
+          text = path.read_text(encoding="utf-8")
+
+          if path.suffix == ".kts":
+              deps = [
+                  'implementation("com.google.android.gms:play-services-location:21.0.1")',
+                  'implementation("androidx.biometric:biometric:1.2.0-alpha05")',
+              ]
+          else:
+              deps = [
+                  'implementation "com.google.android.gms:play-services-location:21.0.1"',
+                  'implementation "androidx.biometric:biometric:1.2.0-alpha05"',
+              ]
+
+          for dep in deps:
+              if dep not in text:
+                  m = re.search(r'dependencies\s*\{', text)
+                  if not m:
+                      raise SystemExit("❌ dependencies { } block not found")
+                  i = m.end()
+                  text = text[:i] + "\n    " + dep + text[i:]
+
+          path.write_text(text, encoding="utf-8")
+          print(f"✅ Dependencies ensured in {path}")
+          PY
 
       # ------------------------------------------------------------
       # Build APKs (Release + Debug)
       # ------------------------------------------------------------
-      - name: Build APKs (Release + Debug)
+      - name: Build APKs
         working-directory: extracted
         run: |
           chmod +x gradlew
@@ -122,18 +136,20 @@ print('Patched', path, '-> added missing deps (if any)')"
           ./gradlew assembleDebug --no-daemon
 
       # ------------------------------------------------------------
-      # Normalize APK paths (so later steps that expect these always succeed)
+      # Normalize APK paths (guaranteed)
       # ------------------------------------------------------------
-      - name: Normalize APKs
+      - name: Normalize APK paths
         run: |
           mkdir -p app/build/outputs/apk/debug
           mkdir -p app/build/outputs/apk/release
-          cp extracted/app/build/outputs/apk/debug/*.apk app/build/outputs/apk/debug/app-debug.apk
-          cp extracted/app/build/outputs/apk/release/*.apk app/build/outputs/apk/release/app-release.apk
+          cp extracted/app/build/outputs/apk/debug/*.apk \
+             app/build/outputs/apk/debug/app-debug.apk
+          cp extracted/app/build/outputs/apk/release/*.apk \
+             app/build/outputs/apk/release/app-release.apk
           echo "CANON_RELEASE_APK=app/build/outputs/apk/release/app-release.apk" >> $GITHUB_ENV
 
       # ------------------------------------------------------------
-      # Upload artifact to GitHub (your current "upload" path expectation)
+      # Upload artifact
       # ------------------------------------------------------------
       - name: Upload Release APK
         uses: actions/upload-artifact@v4
@@ -142,7 +158,7 @@ print('Patched', path, '-> added missing deps (if any)')"
           path: app/build/outputs/apk/release/app-release.apk
 
       # ------------------------------------------------------------
-      # Callback
+      # Callback to Worker
       # ------------------------------------------------------------
       - name: Notify Worker
         run: |
@@ -152,4 +168,4 @@ print('Patched', path, '-> added missing deps (if any)')"
             -d "{\"build_id\":\"${BUILD_ID}\",\"status\":\"success\",\"artifact_apk_url\":\"${CANON_RELEASE_APK}\"}"
 
       - name: Done
-        run: echo "Android EMERALD build completed"
+        run: echo "✅ Android EMERALD build completed successfully"
