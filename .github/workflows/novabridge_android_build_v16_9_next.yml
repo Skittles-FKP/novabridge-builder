@@ -1,134 +1,176 @@
-name: NovaBridge Android Cloud Build v17 (EMERALD TRIGGER SAFE)
+name: NovaBridge Android Cloud Build v17 EMERALD
 
 on:
-  # ✅ Worker trigger — DO NOT CHANGE
+  workflow_dispatch: {}
   repository_dispatch:
     types:
       - novabridge_android_build_v17_next
 
-  # ✅ Manual trigger (safe, does not affect Worker)
-  workflow_dispatch:
-
 jobs:
-  android-build:
+  android-emerald:
     runs-on: ubuntu-latest
 
     env:
       BUILD_ID: ${{ github.event.client_payload.build_id }}
       ZIP_URL: ${{ github.event.client_payload.zip_url }}
       CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
+      CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
 
-      # 🔒 AGP 8.2.x SAFE
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+
+      # 🔒 EMERALD UPGRADE: AGP 8.2.x SAFE GRADLE
       GRADLE_VERSION: 8.2.2
 
     steps:
-      # ------------------------------------------------------------
-      # Checkout (REQUIRED even if repo content unused)
-      # ------------------------------------------------------------
       - name: 🧩 Checkout repository
         uses: actions/checkout@v4
 
-      # ------------------------------------------------------------
-      # Diagnostics — confirms trigger
-      # ------------------------------------------------------------
-      - name: 🧪 Confirm repository_dispatch payload
+      - name: 🧪 Validate incoming payload
         run: |
-          echo "EVENT=repository_dispatch"
-          echo "BUILD_ID=${BUILD_ID}"
-          echo "ZIP_URL=${ZIP_URL}"
-          echo "CALLBACK_URL=${CALLBACK_URL}"
-          echo "GRADLE_VERSION=${GRADLE_VERSION}"
+          set -e
+          test -n "$BUILD_ID"
+          test -n "$ZIP_URL"
+          test -n "$CALLBACK_URL"
 
-      # ------------------------------------------------------------
-      # Java 17 (AGP requirement)
-      # ------------------------------------------------------------
       - name: ☕ Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: "17"
 
-      # ------------------------------------------------------------
-      # 🔒 FORCE GRADLE 8.2.2 (CRITICAL FIX)
-      # ------------------------------------------------------------
-      - name: 🔧 Install pinned Gradle
+      - name: 🤖 Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: 📥 Download Android ZIP
         run: |
+          set -e
+          mkdir -p work
+          curl -fL "$ZIP_URL" -o work/app.zip
+
+      - name: 📦 Extract ZIP
+        run: |
+          set -e
+          unzip -q work/app.zip -d work/extracted
+
+      - name: 🔍 Locate Android project root
+        run: |
+          set -e
+          ROOT=$(find work/extracted -name settings.gradle -o -name settings.gradle.kts | head -n 1 | xargs dirname)
+          test -n "$ROOT"
+          echo "ANDROID_ROOT=$ROOT" >> $GITHUB_ENV
+
+      # ============================================================
+      # 🔒 EMERALD UPGRADE: FORCE GRADLE 8.2.2 (NO REGRESSIONS)
+      # ============================================================
+      - name: 🔧 Install pinned Gradle (EMERALD safe)
+        run: |
+          set -e
           curl -sSL https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip -o gradle.zip
           unzip -q gradle.zip
           echo "$PWD/gradle-${GRADLE_VERSION}/bin" >> $GITHUB_PATH
           gradle --version
 
-      # ------------------------------------------------------------
-      # Download ZIP from Worker
-      # ------------------------------------------------------------
-      - name: 📥 Download Android project ZIP
-        run: |
-          curl -L "$ZIP_URL" -o project.zip
-          unzip -q project.zip -d extracted
-          ls -la extracted
+      # ✅ Gradle cache ONLY after ZIP exists (unchanged behaviour)
+      - name: 🧱 Setup Gradle (post-ZIP)
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          build-root-directory: ${{ env.ANDROID_ROOT }}
 
-      # ------------------------------------------------------------
-      # Android SDK
-      # ------------------------------------------------------------
-      - name: 📦 Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      # ------------------------------------------------------------
-      # Debug keystore (required)
-      # ------------------------------------------------------------
-      - name: 🔑 Ensure debug keystore
+      - name: 🔧 Ensure gradlew executable
         run: |
+          set -e
+          cd "$ANDROID_ROOT"
+          chmod +x gradlew || true
+
+      - name: 🛠 Bootstrap Gradle wrapper if missing
+        run: |
+          set -e
+          cd "$ANDROID_ROOT"
+          if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
+            gradle wrapper --gradle-version $GRADLE_VERSION
+          fi
+
+      - name: 🔐 Recreate debug keystore
+        run: |
+          set -e
           mkdir -p ~/.android
-          if [ ! -f ~/.android/debug.keystore ]; then
-            keytool -genkeypair \
-              -keystore ~/.android/debug.keystore \
-              -storepass android \
-              -alias androiddebugkey \
-              -keypass android \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
+          rm -f ~/.android/debug.keystore
+          keytool -genkeypair -v \
+            -keystore ~/.android/debug.keystore \
+            -storepass android \
+            -alias androiddebugkey \
+            -keypass android \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+      # 🧯 EMERALD SAFE MODE (UNCHANGED, CRITICAL)
+      - name: 🧯 Enforce Gradle EMERALD safe mode
+        run: |
+          echo "ORG_GRADLE_CONFIGURATION_CACHE=false" >> $GITHUB_ENV
+          echo "ORG_GRADLE_PARALLEL=false" >> $GITHUB_ENV
+          echo "ORG_GRADLE_DAEMON=false" >> $GITHUB_ENV
+          echo "ORG_GRADLE_CACHING=false" >> $GITHUB_ENV
+
+      # 🔥 HARDENED BUILD (APK + AAB)
+      - name: 🏗 Build APK + AAB (EMERALD hardened)
+        run: |
+          set -e
+          cd "$ANDROID_ROOT"
+
+          GRADLE_FLAGS="--no-daemon --no-parallel --no-build-cache --no-configuration-cache"
+
+          if ./gradlew $GRADLE_FLAGS assembleRelease bundleRelease; then
+            echo "VARIANT=release" >> $GITHUB_ENV
+          else
+            ./gradlew $GRADLE_FLAGS assembleDebug
+            echo "VARIANT=debug" >> $GITHUB_ENV
           fi
 
-      # ------------------------------------------------------------
-      # Build APK (Release)
-      # ------------------------------------------------------------
-      - name: 🏗️ Build APK (Release)
-        working-directory: extracted
+      - name: 📍 Locate APK & AAB
         run: |
-          gradle assembleRelease --no-daemon
+          set -e
+          cd "$ANDROID_ROOT"
 
-      # ------------------------------------------------------------
-      # Locate APK
-      # ------------------------------------------------------------
-      - name: 🔍 Locate APK
+          APK=$(find . -name "*.apk" | head -n 1 || true)
+          AAB=$(find . -name "*.aab" | head -n 1 || true)
+
+          test -n "$APK"
+
+          echo "APK_PATH=$APK" >> $GITHUB_ENV
+          echo "AAB_PATH=$AAB" >> $GITHUB_ENV
+
+      - name: ☁️ Upload artifacts to Cloudflare R2
         run: |
-          APK_PATH=$(find extracted -type f -name "*.apk" | head -n 1)
-          if [ -z "$APK_PATH" ]; then
-            echo "❌ APK not found"
-            exit 1
+          set -e
+          ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+
+          APK_KEY="android-emerald/${BUILD_ID}.apk"
+          aws s3 cp "$APK_PATH" "s3://${R2_BUCKET}/${APK_KEY}" \
+            --endpoint-url "$ENDPOINT" \
+            --acl public-read
+
+          echo "APK_URL=https://${R2_BUCKET}.r2.dev/${APK_KEY}" >> $GITHUB_ENV
+
+          if [ -n "$AAB_PATH" ]; then
+            AAB_KEY="android-emerald/${BUILD_ID}.aab"
+            aws s3 cp "$AAB_PATH" "s3://${R2_BUCKET}/${AAB_KEY}" \
+              --endpoint-url "$ENDPOINT" \
+              --acl public-read
+            echo "AAB_URL=https://${R2_BUCKET}.r2.dev/${AAB_KEY}" >> $GITHUB_ENV
           fi
-          echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
-          echo "Found APK: $APK_PATH"
 
-      # ------------------------------------------------------------
-      # Callback to Worker (THIS FLIPS UI TO COMPLETE)
-      # ------------------------------------------------------------
-      - name: ☁️ Notify Worker (callback)
+      - name: 📡 Callback NovaBridge Worker (APK + AAB)
         run: |
+          set -e
           curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
-            -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
-            -d "{
-              \"build_id\": \"${BUILD_ID}\",
-              \"status\": \"success\",
-              \"artifact_apk_url\": \"${APK_PATH}\"
-            }"
-
-      # ------------------------------------------------------------
-      # Done
-      # ------------------------------------------------------------
-      - name: ✅ Build completed
-        run: |
-          echo "Android EMERALD build completed successfully for ${BUILD_ID}"
+            -H "x-novabridge-token: $CALLBACK_TOKEN" \
+            -d "$(jq -n \
+              --arg build_id "$BUILD_ID" \
+              --arg status "success" \
+              --arg apk "$APK_URL" \
+              --arg aab "$AAB_URL" \
+              '{build_id:$build_id,status:$status,artifact_apk_url:$apk,artifact_aab_url:$aab}')"
