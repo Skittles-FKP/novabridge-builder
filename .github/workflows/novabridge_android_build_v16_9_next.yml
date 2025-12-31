@@ -60,19 +60,20 @@ jobs:
         uses: android-actions/setup-android@v3
 
       # ------------------------------------------------------------
-      # 🔒 FIX: Ensure adaptive icon foreground exists (CI-safe)
+      # 🔒 FIX: Generate AAPT-SAFE adaptive icon foreground
       # ------------------------------------------------------------
-      - name: 🎨 Ensure ic_launcher_foreground.png
+      - name: 🎨 Generate ic_launcher_foreground.png (AAPT-safe)
         run: |
           ICON_DIR="extracted/app/src/main/res/mipmap-mdpi"
           mkdir -p "$ICON_DIR"
 
-          # Create a minimal valid PNG if missing
           ICON_PATH="$ICON_DIR/ic_launcher_foreground.png"
-          if [ ! -f "$ICON_PATH" ]; then
-            echo "Creating placeholder ic_launcher_foreground.png"
-            printf '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\xdacd\xf8\x0f\x00\x01\x01\x01\x00\x18\xdd\x8d\x18\x00\x00\x00\x00IEND\xaeB`\x82' > "$ICON_PATH"
-          fi
+
+          # Use ImageMagick to create a valid PNG (48x48 transparent)
+          convert -size 48x48 xc:none "$ICON_PATH"
+
+          echo "Generated foreground icon:"
+          file "$ICON_PATH"
 
       # ------------------------------------------------------------
       # Debug keystore
