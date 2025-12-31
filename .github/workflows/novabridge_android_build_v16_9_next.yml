@@ -58,7 +58,7 @@ jobs:
           ROOT=$(find work/extracted -name settings.gradle -o -name settings.gradle.kts | head -n 1 | xargs dirname)
           echo "ANDROID_ROOT=$ROOT" >> $GITHUB_ENV
 
-      # ✅ CORRECT PLACE FOR GRADLE CACHE (POST-ZIP)
+      # ✅ Correct place for Gradle dependency cache (POST-ZIP)
       - name: 🧱 Setup Gradle (post-ZIP caching)
         uses: gradle/actions/setup-gradle@v3
         with:
@@ -78,7 +78,6 @@ jobs:
             gradle wrapper
           fi
 
-      # ✅ FIX APPLIED HERE
       - name: 🔐 Recreate debug keystore
         run: |
           set -e
@@ -92,16 +91,16 @@ jobs:
             -keyalg RSA -keysize 2048 -validity 10000 \
             -dname "CN=Android Debug,O=Android,C=US"
 
-      # 🔥 APK + AAB BUILD
+      # 🔥 FIXED: CONFIGURATION CACHE DISABLED (EMERALD RULE)
       - name: 🏗 Build APK + AAB (release → debug fallback)
         run: |
           set -e
           cd "$ANDROID_ROOT"
 
-          if ./gradlew assembleRelease bundleRelease; then
+          if ./gradlew --no-configuration-cache assembleRelease bundleRelease; then
             echo "VARIANT=release" >> $GITHUB_ENV
           else
-            ./gradlew assembleDebug
+            ./gradlew --no-configuration-cache assembleDebug
             echo "VARIANT=debug" >> $GITHUB_ENV
           fi
 
