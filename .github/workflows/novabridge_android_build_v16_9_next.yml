@@ -1,11 +1,11 @@
 name: NovaBridge Android Cloud Build v17 (EMERALD FINAL LOCKED)
 
 on:
-  # 🔒 DO NOT CHANGE — this is what the Worker dispatches
+  # 🔒 DO NOT CHANGE — Worker dispatch trigger
   repository_dispatch:
     types: [novabridge_android_build_v17_next]
 
-  # Manual trigger (safe, does not affect Worker)
+  # Manual trigger (safe)
   workflow_dispatch:
 
 jobs:
@@ -19,12 +19,12 @@ jobs:
 
     steps:
       # ------------------------------------------------------------
-      # Checkout (required for GitHub Actions context)
+      # Checkout
       # ------------------------------------------------------------
       - uses: actions/checkout@v4
 
       # ------------------------------------------------------------
-      # Java 17 — REQUIRED for AGP 8.x
+      # Java 17 — required for AGP 8.x
       # ------------------------------------------------------------
       - name: ☕ Setup Java 17
         uses: actions/setup-java@v4
@@ -33,12 +33,11 @@ jobs:
           java-version: 17
 
       # ------------------------------------------------------------
-      # 🔒 CRITICAL FIX — PIN GRADLE + CORRECT HOST
-      # Uses downloads.gradle.org (services.gradle.org now 404s in CI)
+      # 🔒 CRITICAL FIX — REAL, PUBLISHED GRADLE VERSION
       # ------------------------------------------------------------
-      - name: 🔧 Install Gradle 8.2.2 (AGP-safe, locked)
+      - name: 🔧 Install Gradle 8.2.1 (AGP-safe, published)
         run: |
-          GRADLE_VERSION=8.2.2
+          GRADLE_VERSION=8.2.1
           echo "Installing Gradle ${GRADLE_VERSION}"
           curl -fL https://downloads.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip -o gradle.zip
           unzip -q gradle.zip
@@ -61,7 +60,7 @@ jobs:
         uses: android-actions/setup-android@v3
 
       # ------------------------------------------------------------
-      # Debug keystore (required for debug + release fallback)
+      # Debug keystore
       # ------------------------------------------------------------
       - name: 🔑 Ensure debug keystore
         run: |
@@ -98,7 +97,7 @@ jobs:
           echo "Found APK: $APK_PATH"
 
       # ------------------------------------------------------------
-      # Callback to Worker (marks terminal + provides artifact)
+      # Callback to Worker
       # ------------------------------------------------------------
       - name: ☁️ Notify Worker (callback)
         run: |
