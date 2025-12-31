@@ -1,11 +1,9 @@
 name: NovaBridge Android Cloud Build v17 (EMERALD FINAL LOCKED)
 
 on:
-  # 🔒 Worker-triggered build (DO NOT CHANGE)
   repository_dispatch:
     types: [novabridge_android_build_v17_next]
 
-  # Manual trigger (safe)
   workflow_dispatch:
 
 jobs:
@@ -24,7 +22,7 @@ jobs:
       - uses: actions/checkout@v4
 
       # ------------------------------------------------------------
-      # Java 17 (AGP 8.x requirement)
+      # Java 17
       # ------------------------------------------------------------
       - name: ☕ Setup Java 17
         uses: actions/setup-java@v4
@@ -33,34 +31,31 @@ jobs:
           java-version: 17
 
       # ------------------------------------------------------------
-      # 🧰 Install ImageMagick (for icon generation)
+      # System deps
       # ------------------------------------------------------------
       - name: 🧰 Install ImageMagick
         run: |
           sudo apt-get update
           sudo apt-get install -y imagemagick
-          convert --version
 
       # ------------------------------------------------------------
-      # 🔒 Gradle (published, AGP-safe)
+      # Gradle (published, AGP-safe)
       # ------------------------------------------------------------
       - name: 🔧 Install Gradle 8.2.1
         run: |
           GRADLE_VERSION=8.2.1
-          echo "Installing Gradle ${GRADLE_VERSION}"
           curl -fL https://downloads.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip -o gradle.zip
           unzip -q gradle.zip
           echo "$PWD/gradle-${GRADLE_VERSION}/bin" >> $GITHUB_PATH
           gradle --version
 
       # ------------------------------------------------------------
-      # Download Android project ZIP from Worker
+      # Download project
       # ------------------------------------------------------------
       - name: 📥 Download Android project ZIP
         run: |
           curl -L "$ZIP_URL" -o project.zip
           unzip -q project.zip -d extracted
-          ls -la extracted
 
       # ------------------------------------------------------------
       # Android SDK
@@ -69,19 +64,38 @@ jobs:
         uses: android-actions/setup-android@v3
 
       # ------------------------------------------------------------
-      # 🔒 FIX: Generate AAPT-safe adaptive icon foreground
+      # 🔒 FIX 1: Ensure adaptive icon foreground (AAPT-safe)
       # ------------------------------------------------------------
-      - name: 🎨 Generate ic_launcher_foreground.png (AAPT-safe)
+      - name: 🎨 Generate ic_launcher_foreground.png
         run: |
           ICON_DIR="extracted/app/src/main/res/mipmap-mdpi"
           mkdir -p "$ICON_DIR"
-          ICON_PATH="$ICON_DIR/ic_launcher_foreground.png"
+          convert -size 48x48 xc:none "$ICON_DIR/ic_launcher_foreground.png"
 
-          # Create a real, valid PNG (48x48 transparent)
-          convert -size 48x48 xc:none "$ICON_PATH"
+      # ------------------------------------------------------------
+      # 🔒 FIX 2: INJECT REQUIRED DEPENDENCIES (Location + Biometric)
+      # ------------------------------------------------------------
+      - name: 🧩 Inject required Android dependencies
+        run: |
+          GRADLE_FILE="extracted/app/build.gradle"
 
-          echo "Generated foreground icon:"
-          file "$ICON_PATH"
+          echo "Patching $GRADLE_FILE"
+
+          # Ensure dependencies block exists
+          grep -q "dependencies {" "$GRADLE_FILE"
+
+          # Google Play Services Location
+          if ! grep -q "play-services-location" "$GRADLE_FILE"; then
+            sed -i '/dependencies {/a\    implementation "com.google.android.gms:play-services-location:21.0.1"' "$GRADLE_FILE"
+          fi
+
+          # AndroidX Biometric
+          if ! grep -q "androidx.biometric" "$GRADLE_FILE"; then
+            sed -i '/dependencies {/a\    implementation "androidx.biometric:biometric:1.2.0-alpha05"' "$GRADLE_FILE"
+          fi
+
+          echo "Injected dependencies:"
+          grep -E "play-services-location|androidx.biometric" "$GRADLE_FILE"
 
       # ------------------------------------------------------------
       # Debug keystore
@@ -100,57 +114,33 @@ jobs:
             -dname "CN=Android Debug,O=Android,C=US" || true
 
       # ------------------------------------------------------------
-      # Build APKs (Release + Debug)
+      # Build APKs
       # ------------------------------------------------------------
       - name: 🏗️ Build APKs (Release + Debug)
         working-directory: extracted
         run: |
-          set -e
           gradle assembleRelease --no-daemon
           gradle assembleDebug --no-daemon
 
       # ------------------------------------------------------------
-      # 🔒 GUARANTEE: Provide canonical APK paths expected by later steps
-      # Ensures:
-      #   ./app/build/outputs/apk/debug/app-debug.apk
-      #   ./app/build/outputs/apk/release/app-release.apk
+      # Normalize APK paths
       # ------------------------------------------------------------
-      - name: ✅ Normalize APK output paths (guarantee canonical locations)
+      - name: ✅ Normalize APK output paths
         run: |
-          set -e
+          REAL_DEBUG_APK=$(find extracted/app/build/outputs/apk/debug -name "*.apk" | head -n 1)
+          REAL_RELEASE_APK=$(find extracted/app/build/outputs/apk/release -name "*.apk" | head -n 1)
 
-          # Find real outputs from the extracted project
-          REAL_DEBUG_APK=$(find extracted/app/build/outputs/apk/debug -type f -name "*.apk" | head -n 1 || true)
-          REAL_RELEASE_APK=$(find extracted/app/build/outputs/apk/release -type f -name "*.apk" | head -n 1 || true)
-
-          echo "REAL_DEBUG_APK=$REAL_DEBUG_APK"
-          echo "REAL_RELEASE_APK=$REAL_RELEASE_APK"
-
-          if [ -z "$REAL_DEBUG_APK" ]; then
-            echo "❌ Debug APK not found under extracted/app/build/outputs/apk/debug"
-            exit 1
-          fi
-
-          if [ -z "$REAL_RELEASE_APK" ]; then
-            echo "❌ Release APK not found under extracted/app/build/outputs/apk/release"
-            exit 1
-          fi
-
-          # Create canonical paths at repo root (./app/...) to satisfy tools/steps that expect them
           mkdir -p app/build/outputs/apk/debug
           mkdir -p app/build/outputs/apk/release
 
-          cp -f "$REAL_DEBUG_APK"  app/build/outputs/apk/debug/app-debug.apk
-          cp -f "$REAL_RELEASE_APK" app/build/outputs/apk/release/app-release.apk
+          cp "$REAL_DEBUG_APK" app/build/outputs/apk/debug/app-debug.apk
+          cp "$REAL_RELEASE_APK" app/build/outputs/apk/release/app-release.apk
 
           echo "CANON_DEBUG_APK=app/build/outputs/apk/debug/app-debug.apk" >> $GITHUB_ENV
           echo "CANON_RELEASE_APK=app/build/outputs/apk/release/app-release.apk" >> $GITHUB_ENV
 
-          ls -la app/build/outputs/apk/debug
-          ls -la app/build/outputs/apk/release
-
       # ------------------------------------------------------------
-      # Upload artifacts to GitHub (optional but useful; also prevents "path does not exist")
+      # Upload artifacts
       # ------------------------------------------------------------
       - name: 📦 Upload Debug APK
         uses: actions/upload-artifact@v4
@@ -165,9 +155,7 @@ jobs:
           path: app/build/outputs/apk/release/app-release.apk
 
       # ------------------------------------------------------------
-      # Callback to Worker (marks terminal + provides artifact)
-      # NOTE: This sends the *canonical path* (local path). If your Worker expects a public URL,
-      # you should add your R2 upload step here later.
+      # Callback
       # ------------------------------------------------------------
       - name: ☁️ Notify Worker (callback)
         run: |
@@ -177,8 +165,7 @@ jobs:
             -d "{
               \"build_id\": \"${BUILD_ID}\",
               \"status\": \"success\",
-              \"artifact_apk_url\": \"${CANON_RELEASE_APK}\",
-              \"artifact_debug_apk_path\": \"${CANON_DEBUG_APK}\"
+              \"artifact_apk_url\": \"${CANON_RELEASE_APK}\"
             }"
 
       # ------------------------------------------------------------
@@ -186,6 +173,4 @@ jobs:
       # ------------------------------------------------------------
       - name: ✅ Build completed
         run: |
-          echo "Android EMERALD build completed successfully for ${BUILD_ID}"
-          echo "Debug:  ${CANON_DEBUG_APK}"
-          echo "Release:${CANON_RELEASE_APK}"
+          echo "Android EMERALD build completed successfully"
