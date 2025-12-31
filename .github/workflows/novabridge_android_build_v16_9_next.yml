@@ -73,7 +73,7 @@ jobs:
           convert -size 48x48 xc:none "$ICON_DIR/ic_launcher_foreground.png"
 
       # ------------------------------------------------------------
-      # 🔒 Generate CLEAN debug keystore (single source of truth)
+      # Generate clean debug keystore
       # ------------------------------------------------------------
       - name: 🔑 Generate debug keystore
         run: |
@@ -89,16 +89,14 @@ jobs:
             -dname "CN=Android Debug,O=Android,C=US"
 
       # ------------------------------------------------------------
-      # 🔒 FORCE Gradle to use the valid keystore for ALL builds
+      # 🔐 Patch signing config (YAML-safe heredoc)
       # ------------------------------------------------------------
-      - name: 🔐 Patch signing config (debug + release)
+      - name: 🔐 Enforce signing config
         run: |
           GRADLE_FILE="extracted/app/build.gradle"
 
-          echo "Patching signingConfigs in $GRADLE_FILE"
-
-          if ! grep -q "signingConfigs" "$GRADLE_FILE"; then
-            cat >> "$GRADLE_FILE" <<'EOF'
+          if ! grep -q "signingConfigs {" "$GRADLE_FILE"; then
+            cat <<'EOF' >> "$GRADLE_FILE"
 
 android {
     signingConfigs {
@@ -128,10 +126,8 @@ android {
 EOF
           fi
 
-          echo "Signing config enforced."
-
       # ------------------------------------------------------------
-      # 🔒 Inject required plugin dependencies
+      # Inject plugin dependencies
       # ------------------------------------------------------------
       - name: 🧩 Inject plugin dependencies
         run: |
@@ -171,7 +167,7 @@ EOF
           echo "CANON_RELEASE_APK=app/build/outputs/apk/release/app-release.apk" >> $GITHUB_ENV
 
       # ------------------------------------------------------------
-      # Upload artifact
+      # Upload Release APK
       # ------------------------------------------------------------
       - name: 📦 Upload Release APK
         uses: actions/upload-artifact@v4
@@ -180,7 +176,7 @@ EOF
           path: app/build/outputs/apk/release/app-release.apk
 
       # ------------------------------------------------------------
-      # Callback
+      # Callback to Worker
       # ------------------------------------------------------------
       - name: ☁️ Notify Worker (callback)
         run: |
