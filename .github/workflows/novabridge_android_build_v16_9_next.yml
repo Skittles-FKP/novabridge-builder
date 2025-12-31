@@ -1,174 +1,111 @@
-name: NovaBridge Android Cloud Build v17 EMERALD
+name: NovaBridge Android Cloud Build v17 (EMERALD FINAL LOCKED)
 
 on:
-  workflow_dispatch: {}
   repository_dispatch:
-    types:
-      - novabridge_android_build_v17_next
+    types: [novabridge_android_build_v17_next]
+
+  workflow_dispatch:
 
 jobs:
-  android-emerald:
+  android-build:
     runs-on: ubuntu-latest
 
     env:
       BUILD_ID: ${{ github.event.client_payload.build_id }}
       ZIP_URL: ${{ github.event.client_payload.zip_url }}
       CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
-      CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
-
-      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      R2_BUCKET: ${{ secrets.R2_BUCKET }}
-
-      GRADLE_VERSION: 8.2.1
 
     steps:
-      - name: 🧩 Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: 🧪 Validate incoming payload
-        run: |
-          set -e
-          test -n "$BUILD_ID"
-          test -n "$ZIP_URL"
-          test -n "$CALLBACK_URL"
-
-      - name: ☕ Setup Java 17
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: 17
 
-      - name: 🤖 Setup Android SDK
+      - name: Install ImageMagick
+        run: sudo apt-get update && sudo apt-get install -y imagemagick
+
+      - name: Install Gradle
+        run: |
+          curl -fL https://downloads.gradle.org/distributions/gradle-8.2.1-bin.zip -o gradle.zip
+          unzip -q gradle.zip
+          echo "$PWD/gradle-8.2.1/bin" >> $GITHUB_PATH
+          gradle --version
+
+      - name: Download project
+        run: |
+          curl -L "$ZIP_URL" -o project.zip
+          unzip -q project.zip -d extracted
+
+      - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: 📥 Download Android ZIP
+      - name: Generate icon
         run: |
-          set -e
-          mkdir -p work
-          curl -fL "$ZIP_URL" -o work/app.zip
+          mkdir -p extracted/app/src/main/res/mipmap-mdpi
+          convert -size 48x48 xc:none extracted/app/src/main/res/mipmap-mdpi/ic_launcher_foreground.png
 
-      - name: 📦 Extract ZIP
+      - name: Generate debug keystore
         run: |
-          set -e
-          unzip -q work/app.zip -d work/extracted
-
-      - name: 🔍 Locate Android project root
-        run: |
-          set -e
-          ROOT=$(find work/extracted -name settings.gradle -o -name settings.gradle.kts | head -n 1 | xargs dirname)
-          test -n "$ROOT"
-          echo "ANDROID_ROOT=$ROOT" >> $GITHUB_ENV
-
-      - name: 🎨 Ensure adaptive icon foreground exists
-        run: |
-          set -e
-          cd "$ANDROID_ROOT"
-          DIR="app/src/main/res/mipmap-anydpi-v26"
-          mkdir -p "$DIR"
-          if [ ! -f "$DIR/ic_launcher_foreground.png" ]; then
-            printf '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\xdac\xf8\x0f\x00\x01\x01\x01\x00\x18\xdd\x8d\x18\x00\x00\x00\x00IEND\xaeB`\x82' \
-              > "$DIR/ic_launcher_foreground.png"
-          fi
-
-      - name: 🧱 Setup Gradle 8.2.1 (EMERALD)
-        uses: gradle/actions/setup-gradle@v3
-        with:
-          gradle-version: ${{ env.GRADLE_VERSION }}
-          build-root-directory: ${{ env.ANDROID_ROOT }}
-
-      - name: 🔧 Ensure gradlew executable
-        run: |
-          set -e
-          cd "$ANDROID_ROOT"
-          chmod +x gradlew || true
-
-      - name: 🛠 Bootstrap Gradle wrapper if missing
-        run: |
-          set -e
-          cd "$ANDROID_ROOT"
-          if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
-            gradle wrapper --gradle-version $GRADLE_VERSION
-          fi
-
-      - name: 🔐 Recreate debug keystore
-        run: |
-          set -e
           mkdir -p ~/.android
-          rm -f ~/.android/debug.keystore
-          keytool -genkeypair -v \
+          keytool -genkeypair \
             -keystore ~/.android/debug.keystore \
             -storepass android \
             -alias androiddebugkey \
             -keypass android \
-            -keyalg RSA -keysize 2048 -validity 10000 \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
             -dname "CN=Android Debug,O=Android,C=US"
 
-      # ============================================================
-      # 🆕 EMERALD FIX: sync keystore where Gradle expects it
-      # ============================================================
-      - name: 🔑 Sync debug.keystore into app module
+      # ------------------------------------------------------------
+      # Create Gradle init script (dependency injection)
+      # ------------------------------------------------------------
+      - name: Create Gradle init script for plugins
         run: |
-          set -e
-          cp ~/.android/debug.keystore "$ANDROID_ROOT/app/debug.keystore"
-          ls -la "$ANDROID_ROOT/app/debug.keystore"
+          echo "allprojects {" > injected.gradle
+          echo "  afterEvaluate { p ->" >> injected.gradle
+          echo "    if (p.plugins.hasPlugin('com.android.application')) {" >> injected.gradle
+          echo "      p.dependencies {" >> injected.gradle
+          echo "        implementation 'com.google.android.gms:play-services-location:21.0.1'" >> injected.gradle
+          echo "        implementation 'androidx.biometric:biometric:1.2.0-alpha05'" >> injected.gradle
+          echo "      }" >> injected.gradle
+          echo "    }" >> injected.gradle
+          echo "  }" >> injected.gradle
+          echo "}" >> injected.gradle
 
-      - name: 🧯 Enforce Gradle EMERALD safe mode
+      # ------------------------------------------------------------
+      # 🔒 FIX: Always use gradlew + init script for ALL variants
+      # ------------------------------------------------------------
+      - name: Build APKs (Release + Debug)
+        working-directory: extracted
         run: |
-          echo "ORG_GRADLE_CONFIGURATION_CACHE=false" >> $GITHUB_ENV
-          echo "ORG_GRADLE_PARALLEL=false" >> $GITHUB_ENV
-          echo "ORG_GRADLE_DAEMON=false" >> $GITHUB_ENV
-          echo "ORG_GRADLE_CACHING=false" >> $GITHUB_ENV
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon -I ../injected.gradle
+          ./gradlew assembleDebug   --no-daemon -I ../injected.gradle
 
-      - name: 🏗 Build APK + AAB (EMERALD hardened)
+      - name: Normalize APKs
         run: |
-          set -e
-          cd "$ANDROID_ROOT"
-          GRADLE_FLAGS="--no-daemon --no-parallel --no-build-cache --no-configuration-cache"
-          if ./gradlew $GRADLE_FLAGS assembleRelease bundleRelease; then
-            echo "VARIANT=release" >> $GITHUB_ENV
-          else
-            ./gradlew $GRADLE_FLAGS assembleDebug
-            echo "VARIANT=debug" >> $GITHUB_ENV
-          fi
+          mkdir -p app/build/outputs/apk/debug
+          mkdir -p app/build/outputs/apk/release
+          cp extracted/app/build/outputs/apk/debug/*.apk app/build/outputs/apk/debug/app-debug.apk
+          cp extracted/app/build/outputs/apk/release/*.apk app/build/outputs/apk/release/app-release.apk
+          echo "CANON_RELEASE_APK=app/build/outputs/apk/release/app-release.apk" >> $GITHUB_ENV
 
-      - name: 📍 Locate APK & AAB
-        run: |
-          set -e
-          cd "$ANDROID_ROOT"
-          APK=$(find . -name "*.apk" | head -n 1 || true)
-          AAB=$(find . -name "*.aab" | head -n 1 || true)
-          test -n "$APK"
-          echo "APK_PATH=$APK" >> $GITHUB_ENV
-          echo "AAB_PATH=$AAB" >> $GITHUB_ENV
+      - name: Upload Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-${{ github.event.client_payload.build_id }}
+          path: app/build/outputs/apk/release/app-release.apk
 
-      - name: ☁️ Upload artifacts to Cloudflare R2
+      - name: Notify Worker
         run: |
-          set -e
-          ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          APK_KEY="android-emerald/${BUILD_ID}.apk"
-          aws s3 cp "$APK_PATH" "s3://${R2_BUCKET}/${APK_KEY}" \
-            --endpoint-url "$ENDPOINT" \
-            --acl public-read
-          echo "APK_URL=https://${R2_BUCKET}.r2.dev/${APK_KEY}" >> $GITHUB_ENV
-          if [ -n "$AAB_PATH" ]; then
-            AAB_KEY="android-emerald/${BUILD_ID}.aab"
-            aws s3 cp "$AAB_PATH" "s3://${R2_BUCKET}/${AAB_KEY}" \
-              --endpoint-url "$ENDPOINT" \
-              --acl public-read
-            echo "AAB_URL=https://${R2_BUCKET}.r2.dev/${AAB_KEY}" >> $GITHUB_ENV
-          fi
-
-      - name: 📡 Callback NovaBridge Worker (APK + AAB)
-        run: |
-          set -e
           curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
-            -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d "$(jq -n \
-              --arg build_id "$BUILD_ID" \
-              --arg status "success" \
-              --arg apk "$APK_URL" \
-              --arg aab "$AAB_URL" \
-              '{build_id:$build_id,status:$status,artifact_apk_url:$apk,artifact_aab_url:$aab}')"
+            -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
+            -d "{\"build_id\":\"${BUILD_ID}\",\"status\":\"success\",\"artifact_apk_url\":\"${CANON_RELEASE_APK}\"}"
+
+      - name: Done
+        run: echo "Android EMERALD build completed"
