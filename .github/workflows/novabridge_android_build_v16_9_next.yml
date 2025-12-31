@@ -59,19 +59,20 @@ jobs:
           mkdir -p work/extracted
           unzip -q work/app.zip -d work/extracted
 
-      - name: Find Android root
+      - name: Locate Android project root
         run: |
           set -e
           ROOT=$(find work/extracted -name settings.gradle -o -name settings.gradle.kts | head -n 1 | xargs dirname)
           echo "ANDROID_ROOT=$ROOT" >> $GITHUB_ENV
+          echo "Android root: $ROOT"
 
-      - name: Ensure gradlew
+      - name: Ensure gradlew executable
         run: |
           set -e
           cd "$ANDROID_ROOT"
           chmod +x gradlew
 
-      - name: Bootstrap Gradle wrapper
+      - name: Ensure Gradle wrapper exists
         run: |
           set -e
           cd "$ANDROID_ROOT"
@@ -79,13 +80,13 @@ jobs:
             gradle wrapper
           fi
 
-      # ✅ 🔴 FIX: ensure ~/.android exists BEFORE keytool
-      - name: Prepare Android debug keystore directory
+      # 🔴 CRITICAL FIX — create directory BEFORE keytool
+      - name: Prepare Android keystore directory
         run: |
           set -e
           mkdir -p ~/.android
 
-      - name: Fix debug keystore
+      - name: Generate debug keystore
         run: |
           set -e
           rm -f ~/.android/debug.keystore
@@ -99,7 +100,7 @@ jobs:
             -validity 10000 \
             -dname "CN=Android Debug,O=Android,C=US"
 
-      - name: Build APK
+      - name: Build APK (release → debug fallback)
         run: |
           set -e
           cd "$ANDROID_ROOT"
@@ -116,6 +117,7 @@ jobs:
           cd "$ANDROID_ROOT"
           APK=$(find . -name "*.apk" | head -n 1)
           echo "APK_PATH=$APK" >> $GITHUB_ENV
+          echo "APK found: $APK"
 
       - name: Upload APK to R2
         run: |
@@ -127,7 +129,7 @@ jobs:
             --acl public-read
           echo "ARTIFACT_URL=https://${R2_BUCKET}.r2.dev/${KEY}" >> $GITHUB_ENV
 
-      - name: Callback Worker
+      - name: Callback Worker (SUCCESS)
         run: |
           set -e
           curl -X POST "$CALLBACK_URL" \
