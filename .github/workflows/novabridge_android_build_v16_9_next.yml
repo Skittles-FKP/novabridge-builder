@@ -1,9 +1,11 @@
-name: NovaBridge Android Cloud Build v17 (EMERALD FINAL)
+name: NovaBridge Android Cloud Build v17 (EMERALD FINAL LOCKED)
 
 on:
+  # 🔒 DO NOT CHANGE — this is what your Worker triggers
   repository_dispatch:
     types: [novabridge_android_build_v17_next]
 
+  # Manual trigger (safe, does not affect Worker)
   workflow_dispatch:
 
 jobs:
@@ -15,35 +17,52 @@ jobs:
       ZIP_URL: ${{ github.event.client_payload.zip_url }}
       CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
 
-      # 🔒 ONLY ADDITION — AGP-SAFE GRADLE
-      GRADLE_VERSION: 8.2.2
-
     steps:
+      # ------------------------------------------------------------
+      # Checkout (required for Actions context)
+      # ------------------------------------------------------------
       - uses: actions/checkout@v4
 
+      # ------------------------------------------------------------
+      # Java 17 — REQUIRED for AGP 8.x
+      # ------------------------------------------------------------
       - name: ☕ Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
-      # ✅ SAME STRUCTURE AS EMERALD — JUST PINNED
-      - name: 🔧 Install Gradle 8.2.2
+      # ------------------------------------------------------------
+      # 🔒 CRITICAL FIX — PIN GRADLE (INLINE, NO ENV EXPANSION)
+      # ------------------------------------------------------------
+      - name: 🔧 Install Gradle 8.2.2 (AGP-safe)
         run: |
-          curl -sSL https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip -o gradle.zip
+          GRADLE_VERSION=8.2.2
+          echo "Installing Gradle ${GRADLE_VERSION}"
+          curl -fL https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip -o gradle.zip
           unzip -q gradle.zip
           echo "$PWD/gradle-${GRADLE_VERSION}/bin" >> $GITHUB_PATH
           gradle --version
 
-      - name: 📥 Download Android ZIP
+      # ------------------------------------------------------------
+      # Download Android project ZIP from Worker
+      # ------------------------------------------------------------
+      - name: 📥 Download Android project ZIP
         run: |
           curl -L "$ZIP_URL" -o project.zip
           unzip -q project.zip -d extracted
+          ls -la extracted
 
+      # ------------------------------------------------------------
+      # Android SDK
+      # ------------------------------------------------------------
       - name: 📦 Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: 🔑 Debug keystore
+      # ------------------------------------------------------------
+      # Debug keystore (required for debug + release fallback)
+      # ------------------------------------------------------------
+      - name: 🔑 Ensure debug keystore
         run: |
           mkdir -p ~/.android
           keytool -genkeypair \
@@ -56,16 +75,31 @@ jobs:
             -validity 10000 \
             -dname "CN=Android Debug,O=Android,C=US" || true
 
-      - name: 🏗️ Build APK
+      # ------------------------------------------------------------
+      # Build APK (Release)
+      # ------------------------------------------------------------
+      - name: 🏗️ Build APK (Release)
         working-directory: extracted
-        run: gradle assembleRelease --no-daemon
+        run: |
+          gradle assembleRelease --no-daemon
 
+      # ------------------------------------------------------------
+      # Locate APK
+      # ------------------------------------------------------------
       - name: 🔍 Locate APK
         run: |
           APK_PATH=$(find extracted -type f -name "*.apk" | head -n 1)
+          if [ -z "$APK_PATH" ]; then
+            echo "❌ APK not found"
+            exit 1
+          fi
           echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
+          echo "Found APK: $APK_PATH"
 
-      - name: ☁️ Callback Worker
+      # ------------------------------------------------------------
+      # Callback to Worker (marks terminal + provides artifact)
+      # ------------------------------------------------------------
+      - name: ☁️ Notify Worker (callback)
         run: |
           curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
@@ -75,3 +109,10 @@ jobs:
               \"status\": \"success\",
               \"artifact_apk_url\": \"${APK_PATH}\"
             }"
+
+      # ------------------------------------------------------------
+      # Done
+      # ------------------------------------------------------------
+      - name: ✅ Build completed
+        run: |
+          echo "Android EMERALD build completed successfully for ${BUILD_ID}"
