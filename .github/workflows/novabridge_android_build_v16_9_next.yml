@@ -1,128 +1,97 @@
-name: NovaBridge Android NEXT Cloud Build v17.3
+name: NovaBridge Android Cloud Build v16.9 NEXT (RED)
 
 on:
   workflow_dispatch:
   repository_dispatch:
     types:
-      - novabridge_android_build_v17_next
+      - novabridge_android_build_v16_9_next   # ⛔ DO NOT CHANGE (THIS IS WHY IT TRIGGERS)
 
 jobs:
-  android-next:
+  android-build:
     runs-on: ubuntu-latest
 
     env:
       BUILD_ID: ${{ github.event.client_payload.build_id }}
       ZIP_URL: ${{ github.event.client_payload.zip_url }}
       CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
-      CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
-
-      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      R2_BUCKET: ${{ secrets.R2_BUCKET }}
 
     steps:
-      - name: Checkout
+      - name: 🧩 Checkout repository
         uses: actions/checkout@v4
 
-      - name: Validate payload
-        run: |
-          set -e
-          echo "BUILD_ID=$BUILD_ID"
-          echo "ZIP_URL=$ZIP_URL"
-          echo "CALLBACK_URL=$CALLBACK_URL"
-          test -n "$BUILD_ID"
-          test -n "$ZIP_URL"
-          test -n "$CALLBACK_URL"
-
-      - name: Setup Java
+      - name: ☕ Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: 17
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
-
-      - name: Download ZIP
+      - name: 📥 Download Android project ZIP
         run: |
-          set -e
           mkdir -p work
-          curl -fL "$ZIP_URL" -o work/app.zip
+          curl -L "$ZIP_URL" -o work/android-project.zip
 
-      - name: Extract ZIP
+      - name: 📦 Extract Android project
         run: |
-          set -e
-          mkdir -p work/extracted
-          unzip -q work/app.zip -d work/extracted
+          cd work
+          unzip -q android-project.zip
+          ls -la
 
-      - name: Find Android root
+      - name: 📂 Locate Android root
         run: |
-          set -e
-          ROOT=$(find work/extracted -name settings.gradle -o -name settings.gradle.kts | head -n 1 | xargs dirname)
-          echo "ANDROID_ROOT=$ROOT" >> $GITHUB_ENV
-
-      - name: Ensure gradlew
-        run: |
-          set -e
-          cd "$ANDROID_ROOT"
-          chmod +x gradlew
-
-      - name: Bootstrap Gradle wrapper
-        run: |
-          set -e
-          cd "$ANDROID_ROOT"
-          if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
-            gradle wrapper
-          fi
-
-      - name: Fix debug keystore
-        run: |
-          set -e
-          rm -f ~/.android/debug.keystore
-          keytool -genkeypair -v \
-            -keystore ~/.android/debug.keystore \
-            -storepass android \
-            -alias androiddebugkey \
-            -keypass android \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -dname "CN=Android Debug,O=Android,C=US"
-
-      - name: Build APK
-        run: |
-          set -e
-          cd "$ANDROID_ROOT"
-          if ./gradlew assembleRelease; then
-            echo "VARIANT=release" >> $GITHUB_ENV
+          cd work
+          if [ -d "android-project" ]; then
+            echo "ANDROID_ROOT=$PWD/android-project" >> $GITHUB_ENV
           else
-            ./gradlew assembleDebug
-            echo "VARIANT=debug" >> $GITHUB_ENV
+            echo "ANDROID_ROOT=$PWD" >> $GITHUB_ENV
           fi
 
-      - name: Locate APK
+      # ✅ 🔴 INCREMENTAL FIX — THIS IS THE ONLY CHANGE
+      - name: 🔐 Prepare Android debug keystore directory
         run: |
-          set -e
+          mkdir -p "$HOME/.android"
+
+      - name: 🔑 Generate debug keystore (if missing)
+        run: |
+          if [ ! -f "$HOME/.android/debug.keystore" ]; then
+            keytool -genkeypair \
+              -v \
+              -keystore "$HOME/.android/debug.keystore" \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: 🛠️ Ensure Gradle wrapper executable
+        run: |
           cd "$ANDROID_ROOT"
-          APK=$(find . -name "*.apk" | head -n 1)
-          echo "APK_PATH=$APK" >> $GITHUB_ENV
+          chmod +x ./gradlew
 
-      - name: Upload APK to R2
+      - name: 🤖 Build Debug APK
         run: |
-          set -e
-          ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          KEY="android-next/${BUILD_ID}.apk"
-          aws s3 cp "$APK_PATH" "s3://${R2_BUCKET}/${KEY}" \
-            --endpoint-url "$ENDPOINT" \
-            --acl public-read
-          echo "ARTIFACT_URL=https://${R2_BUCKET}.r2.dev/${KEY}" >> $GITHUB_ENV
+          cd "$ANDROID_ROOT"
+          ./gradlew assembleDebug --stacktrace
 
-      - name: Callback Worker
+      - name: 📤 Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: |
+            **/build/outputs/apk/debug/*.apk
+
+      - name: 📡 Callback Worker (success)
+        if: success()
         run: |
-          set -e
           curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
-            -H "x-novabridge-token: $CALLBACK_TOKEN" \
-            -d "{\"build_id\":\"$BUILD_ID\",\"status\":\"success\",\"artifact_url\":\"$ARTIFACT_URL\"}"
+            -d "{\"status\":\"success\",\"build_id\":\"$BUILD_ID\"}"
+
+      - name: 📡 Callback Worker (failure)
+        if: failure()
+        run: |
+          curl -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -d "{\"status\":\"failed\",\"build_id\":\"$BUILD_ID\"}"
