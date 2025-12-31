@@ -16,17 +16,29 @@ jobs:
       CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
 
     steps:
+      # ------------------------------------------------------------
+      # Checkout
+      # ------------------------------------------------------------
       - uses: actions/checkout@v4
 
+      # ------------------------------------------------------------
+      # Java 17
+      # ------------------------------------------------------------
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
+      # ------------------------------------------------------------
+      # System deps
+      # ------------------------------------------------------------
       - name: Install ImageMagick
         run: sudo apt-get update && sudo apt-get install -y imagemagick
 
+      # ------------------------------------------------------------
+      # Gradle
+      # ------------------------------------------------------------
       - name: Install Gradle
         run: |
           curl -fL https://downloads.gradle.org/distributions/gradle-8.2.1-bin.zip -o gradle.zip
@@ -34,19 +46,31 @@ jobs:
           echo "$PWD/gradle-8.2.1/bin" >> $GITHUB_PATH
           gradle --version
 
+      # ------------------------------------------------------------
+      # Download Android project
+      # ------------------------------------------------------------
       - name: Download project
         run: |
           curl -L "$ZIP_URL" -o project.zip
           unzip -q project.zip -d extracted
 
+      # ------------------------------------------------------------
+      # Android SDK
+      # ------------------------------------------------------------
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
+      # ------------------------------------------------------------
+      # Adaptive icon foreground (ensures resource exists)
+      # ------------------------------------------------------------
       - name: Generate icon
         run: |
           mkdir -p extracted/app/src/main/res/mipmap-mdpi
           convert -size 48x48 xc:none extracted/app/src/main/res/mipmap-mdpi/ic_launcher_foreground.png
 
+      # ------------------------------------------------------------
+      # Debug keystore (standard signing)
+      # ------------------------------------------------------------
       - name: Generate debug keystore
         run: |
           mkdir -p ~/.android
@@ -61,31 +85,45 @@ jobs:
             -dname "CN=Android Debug,O=Android,C=US"
 
       # ------------------------------------------------------------
-      # Create Gradle init script (dependency injection)
+      # ✅ FIX: Deterministically inject required plugin dependencies
+      # (No init scripts. No heredocs. Idempotent.)
       # ------------------------------------------------------------
-      - name: Create Gradle init script for plugins
+      - name: Inject required plugin deps (deterministic)
         run: |
-          echo "allprojects {" > injected.gradle
-          echo "  afterEvaluate { p ->" >> injected.gradle
-          echo "    if (p.plugins.hasPlugin('com.android.application')) {" >> injected.gradle
-          echo "      p.dependencies {" >> injected.gradle
-          echo "        implementation 'com.google.android.gms:play-services-location:21.0.1'" >> injected.gradle
-          echo "        implementation 'androidx.biometric:biometric:1.2.0-alpha05'" >> injected.gradle
-          echo "      }" >> injected.gradle
-          echo "    }" >> injected.gradle
-          echo "  }" >> injected.gradle
-          echo "}" >> injected.gradle
+          python -c "import pathlib, re; \
+p1=pathlib.Path('extracted/app/build.gradle'); \
+p2=pathlib.Path('extracted/app/build.gradle.kts'); \
+path = p1 if p1.exists() else p2 if p2.exists() else None; \
+assert path is not None, 'No app/build.gradle(.kts) found'; \
+s=path.read_text(encoding='utf-8'); \
+deps_groovy=['implementation \"com.google.android.gms:play-services-location:21.0.1\"', \
+             'implementation \"androidx.biometric:biometric:1.2.0-alpha05\"']; \
+deps_kts=['implementation(\"com.google.android.gms:play-services-location:21.0.1\")', \
+          'implementation(\"androidx.biometric:biometric:1.2.0-alpha05\")']; \
+is_kts = path.name.endswith('.kts'); \
+need = deps_kts if is_kts else deps_groovy; \
+for line in need: \
+  if line not in s: \
+    m=re.search(r'dependencies\\s*\\{', s); \
+    assert m, 'No dependencies { } block found'; \
+    i=m.end(); \
+    s=s[:i] + ('\\n    ' + line) + s[i:]; \
+path.write_text(s, encoding='utf-8'); \
+print('Patched', path, '-> added missing deps (if any)')"
 
       # ------------------------------------------------------------
-      # 🔒 FIX: Always use gradlew + init script for ALL variants
+      # Build APKs (Release + Debug)
       # ------------------------------------------------------------
       - name: Build APKs (Release + Debug)
         working-directory: extracted
         run: |
           chmod +x gradlew
-          ./gradlew assembleRelease --no-daemon -I ../injected.gradle
-          ./gradlew assembleDebug   --no-daemon -I ../injected.gradle
+          ./gradlew assembleRelease --no-daemon
+          ./gradlew assembleDebug --no-daemon
 
+      # ------------------------------------------------------------
+      # Normalize APK paths (so later steps that expect these always succeed)
+      # ------------------------------------------------------------
       - name: Normalize APKs
         run: |
           mkdir -p app/build/outputs/apk/debug
@@ -94,12 +132,18 @@ jobs:
           cp extracted/app/build/outputs/apk/release/*.apk app/build/outputs/apk/release/app-release.apk
           echo "CANON_RELEASE_APK=app/build/outputs/apk/release/app-release.apk" >> $GITHUB_ENV
 
+      # ------------------------------------------------------------
+      # Upload artifact to GitHub (your current "upload" path expectation)
+      # ------------------------------------------------------------
       - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
           name: app-release-${{ github.event.client_payload.build_id }}
           path: app/build/outputs/apk/release/app-release.apk
 
+      # ------------------------------------------------------------
+      # Callback
+      # ------------------------------------------------------------
       - name: Notify Worker
         run: |
           curl -X POST "$CALLBACK_URL" \
