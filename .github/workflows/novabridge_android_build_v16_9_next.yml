@@ -1,7 +1,7 @@
 name: NovaBridge Android Cloud Build v17 (EMERALD FINAL LOCKED)
 
 on:
-  # 🔒 DO NOT CHANGE — this is what your Worker triggers
+  # 🔒 DO NOT CHANGE — this is what the Worker dispatches
   repository_dispatch:
     types: [novabridge_android_build_v17_next]
 
@@ -19,7 +19,7 @@ jobs:
 
     steps:
       # ------------------------------------------------------------
-      # Checkout (required for Actions context)
+      # Checkout (required for GitHub Actions context)
       # ------------------------------------------------------------
       - uses: actions/checkout@v4
 
@@ -33,13 +33,14 @@ jobs:
           java-version: 17
 
       # ------------------------------------------------------------
-      # 🔒 CRITICAL FIX — PIN GRADLE (INLINE, NO ENV EXPANSION)
+      # 🔒 CRITICAL FIX — PIN GRADLE + CORRECT HOST
+      # Uses downloads.gradle.org (services.gradle.org now 404s in CI)
       # ------------------------------------------------------------
-      - name: 🔧 Install Gradle 8.2.2 (AGP-safe)
+      - name: 🔧 Install Gradle 8.2.2 (AGP-safe, locked)
         run: |
           GRADLE_VERSION=8.2.2
           echo "Installing Gradle ${GRADLE_VERSION}"
-          curl -fL https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip -o gradle.zip
+          curl -fL https://downloads.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip -o gradle.zip
           unzip -q gradle.zip
           echo "$PWD/gradle-${GRADLE_VERSION}/bin" >> $GITHUB_PATH
           gradle --version
