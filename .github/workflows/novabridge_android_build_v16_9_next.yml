@@ -58,7 +58,7 @@ jobs:
           ROOT=$(find work/extracted -name settings.gradle -o -name settings.gradle.kts | head -n 1 | xargs dirname)
           echo "ANDROID_ROOT=$ROOT" >> $GITHUB_ENV
 
-      # ✅ CORRECT PLACE FOR GRADLE CACHE
+      # ✅ CORRECT PLACE FOR GRADLE CACHE (POST-ZIP)
       - name: 🧱 Setup Gradle (post-ZIP caching)
         uses: gradle/actions/setup-gradle@v3
         with:
@@ -78,9 +78,11 @@ jobs:
             gradle wrapper
           fi
 
+      # ✅ FIX APPLIED HERE
       - name: 🔐 Recreate debug keystore
         run: |
           set -e
+          mkdir -p ~/.android
           rm -f ~/.android/debug.keystore
           keytool -genkeypair -v \
             -keystore ~/.android/debug.keystore \
