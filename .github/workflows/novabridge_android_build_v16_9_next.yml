@@ -33,6 +33,15 @@ jobs:
           java-version: 17
 
       # ------------------------------------------------------------
+      # 🔒 Install system dependency: ImageMagick (for icon generation)
+      # ------------------------------------------------------------
+      - name: 🧰 Install ImageMagick
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y imagemagick
+          convert --version
+
+      # ------------------------------------------------------------
       # 🔒 Gradle (published, AGP-safe)
       # ------------------------------------------------------------
       - name: 🔧 Install Gradle 8.2.1
@@ -60,7 +69,7 @@ jobs:
         uses: android-actions/setup-android@v3
 
       # ------------------------------------------------------------
-      # 🔒 FIX: Generate AAPT-SAFE adaptive icon foreground
+      # 🔒 FIX: Generate AAPT-safe adaptive icon foreground
       # ------------------------------------------------------------
       - name: 🎨 Generate ic_launcher_foreground.png (AAPT-safe)
         run: |
@@ -69,7 +78,7 @@ jobs:
 
           ICON_PATH="$ICON_DIR/ic_launcher_foreground.png"
 
-          # Use ImageMagick to create a valid PNG (48x48 transparent)
+          # Create a real, valid PNG (48x48 transparent)
           convert -size 48x48 xc:none "$ICON_PATH"
 
           echo "Generated foreground icon:"
