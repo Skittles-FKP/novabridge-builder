@@ -39,7 +39,7 @@ jobs:
           sudo apt-get install -y imagemagick
 
       # ------------------------------------------------------------
-      # Gradle (published, AGP-safe)
+      # Gradle (AGP-safe)
       # ------------------------------------------------------------
       - name: 🔧 Install Gradle 8.2.1
         run: |
@@ -50,7 +50,7 @@ jobs:
           gradle --version
 
       # ------------------------------------------------------------
-      # Download project
+      # Download Android project ZIP
       # ------------------------------------------------------------
       - name: 📥 Download Android project ZIP
         run: |
@@ -64,7 +64,7 @@ jobs:
         uses: android-actions/setup-android@v3
 
       # ------------------------------------------------------------
-      # 🔒 FIX 1: Ensure adaptive icon foreground (AAPT-safe)
+      # Adaptive icon foreground (AAPT-safe)
       # ------------------------------------------------------------
       - name: 🎨 Generate ic_launcher_foreground.png
         run: |
@@ -73,34 +73,9 @@ jobs:
           convert -size 48x48 xc:none "$ICON_DIR/ic_launcher_foreground.png"
 
       # ------------------------------------------------------------
-      # 🔒 FIX 2: INJECT REQUIRED DEPENDENCIES (Location + Biometric)
+      # 🔒 Generate CLEAN debug keystore (single source of truth)
       # ------------------------------------------------------------
-      - name: 🧩 Inject required Android dependencies
-        run: |
-          GRADLE_FILE="extracted/app/build.gradle"
-
-          echo "Patching $GRADLE_FILE"
-
-          # Ensure dependencies block exists
-          grep -q "dependencies {" "$GRADLE_FILE"
-
-          # Google Play Services Location
-          if ! grep -q "play-services-location" "$GRADLE_FILE"; then
-            sed -i '/dependencies {/a\    implementation "com.google.android.gms:play-services-location:21.0.1"' "$GRADLE_FILE"
-          fi
-
-          # AndroidX Biometric
-          if ! grep -q "androidx.biometric" "$GRADLE_FILE"; then
-            sed -i '/dependencies {/a\    implementation "androidx.biometric:biometric:1.2.0-alpha05"' "$GRADLE_FILE"
-          fi
-
-          echo "Injected dependencies:"
-          grep -E "play-services-location|androidx.biometric" "$GRADLE_FILE"
-
-      # ------------------------------------------------------------
-      # Debug keystore
-      # ------------------------------------------------------------
-      - name: 🔑 Ensure debug keystore
+      - name: 🔑 Generate debug keystore
         run: |
           mkdir -p ~/.android
           keytool -genkeypair \
@@ -111,7 +86,64 @@ jobs:
             -keyalg RSA \
             -keysize 2048 \
             -validity 10000 \
-            -dname "CN=Android Debug,O=Android,C=US" || true
+            -dname "CN=Android Debug,O=Android,C=US"
+
+      # ------------------------------------------------------------
+      # 🔒 FORCE Gradle to use the valid keystore for ALL builds
+      # ------------------------------------------------------------
+      - name: 🔐 Patch signing config (debug + release)
+        run: |
+          GRADLE_FILE="extracted/app/build.gradle"
+
+          echo "Patching signingConfigs in $GRADLE_FILE"
+
+          if ! grep -q "signingConfigs" "$GRADLE_FILE"; then
+            cat >> "$GRADLE_FILE" <<'EOF'
+
+android {
+    signingConfigs {
+        debug {
+            storeFile file(System.getProperty("user.home") + "/.android/debug.keystore")
+            storePassword "android"
+            keyAlias "androiddebugkey"
+            keyPassword "android"
+        }
+        release {
+            storeFile file(System.getProperty("user.home") + "/.android/debug.keystore")
+            storePassword "android"
+            keyAlias "androiddebugkey"
+            keyPassword "android"
+        }
+    }
+
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
+        release {
+            signingConfig signingConfigs.release
+        }
+    }
+}
+EOF
+          fi
+
+          echo "Signing config enforced."
+
+      # ------------------------------------------------------------
+      # 🔒 Inject required plugin dependencies
+      # ------------------------------------------------------------
+      - name: 🧩 Inject plugin dependencies
+        run: |
+          GRADLE_FILE="extracted/app/build.gradle"
+
+          if ! grep -q "play-services-location" "$GRADLE_FILE"; then
+            sed -i '/dependencies {/a\    implementation "com.google.android.gms:play-services-location:21.0.1"' "$GRADLE_FILE"
+          fi
+
+          if ! grep -q "androidx.biometric" "$GRADLE_FILE"; then
+            sed -i '/dependencies {/a\    implementation "androidx.biometric:biometric:1.2.0-alpha05"' "$GRADLE_FILE"
+          fi
 
       # ------------------------------------------------------------
       # Build APKs
@@ -125,7 +157,7 @@ jobs:
       # ------------------------------------------------------------
       # Normalize APK paths
       # ------------------------------------------------------------
-      - name: ✅ Normalize APK output paths
+      - name: ✅ Normalize APK paths
         run: |
           REAL_DEBUG_APK=$(find extracted/app/build/outputs/apk/debug -name "*.apk" | head -n 1)
           REAL_RELEASE_APK=$(find extracted/app/build/outputs/apk/release -name "*.apk" | head -n 1)
@@ -136,18 +168,11 @@ jobs:
           cp "$REAL_DEBUG_APK" app/build/outputs/apk/debug/app-debug.apk
           cp "$REAL_RELEASE_APK" app/build/outputs/apk/release/app-release.apk
 
-          echo "CANON_DEBUG_APK=app/build/outputs/apk/debug/app-debug.apk" >> $GITHUB_ENV
           echo "CANON_RELEASE_APK=app/build/outputs/apk/release/app-release.apk" >> $GITHUB_ENV
 
       # ------------------------------------------------------------
-      # Upload artifacts
+      # Upload artifact
       # ------------------------------------------------------------
-      - name: 📦 Upload Debug APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-debug-${{ github.event.client_payload.build_id }}
-          path: app/build/outputs/apk/debug/app-debug.apk
-
       - name: 📦 Upload Release APK
         uses: actions/upload-artifact@v4
         with:
