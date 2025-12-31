@@ -21,7 +21,6 @@ jobs:
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       R2_BUCKET: ${{ secrets.R2_BUCKET }}
 
-      # 🔒 EMERALD DIAMOND
       GRADLE_VERSION: 8.2.1
 
     steps:
@@ -62,26 +61,17 @@ jobs:
           test -n "$ROOT"
           echo "ANDROID_ROOT=$ROOT" >> $GITHUB_ENV
 
-      # ============================================================
-      # 🆕 EMERALD FIX: Ensure adaptive icon foreground exists
-      # ============================================================
       - name: 🎨 Ensure adaptive icon foreground exists
         run: |
           set -e
           cd "$ANDROID_ROOT"
-
           DIR="app/src/main/res/mipmap-anydpi-v26"
           mkdir -p "$DIR"
-
           if [ ! -f "$DIR/ic_launcher_foreground.png" ]; then
-            echo "Creating placeholder ic_launcher_foreground.png"
             printf '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\xdac\xf8\x0f\x00\x01\x01\x01\x00\x18\xdd\x8d\x18\x00\x00\x00\x00IEND\xaeB`\x82' \
               > "$DIR/ic_launcher_foreground.png"
           fi
 
-      # ============================================================
-      # ✅ Gradle (supported)
-      # ============================================================
       - name: 🧱 Setup Gradle 8.2.1 (EMERALD)
         uses: gradle/actions/setup-gradle@v3
         with:
@@ -115,6 +105,15 @@ jobs:
             -keyalg RSA -keysize 2048 -validity 10000 \
             -dname "CN=Android Debug,O=Android,C=US"
 
+      # ============================================================
+      # 🆕 EMERALD FIX: sync keystore where Gradle expects it
+      # ============================================================
+      - name: 🔑 Sync debug.keystore into app module
+        run: |
+          set -e
+          cp ~/.android/debug.keystore "$ANDROID_ROOT/app/debug.keystore"
+          ls -la "$ANDROID_ROOT/app/debug.keystore"
+
       - name: 🧯 Enforce Gradle EMERALD safe mode
         run: |
           echo "ORG_GRADLE_CONFIGURATION_CACHE=false" >> $GITHUB_ENV
@@ -126,9 +125,7 @@ jobs:
         run: |
           set -e
           cd "$ANDROID_ROOT"
-
           GRADLE_FLAGS="--no-daemon --no-parallel --no-build-cache --no-configuration-cache"
-
           if ./gradlew $GRADLE_FLAGS assembleRelease bundleRelease; then
             echo "VARIANT=release" >> $GITHUB_ENV
           else
@@ -140,12 +137,9 @@ jobs:
         run: |
           set -e
           cd "$ANDROID_ROOT"
-
           APK=$(find . -name "*.apk" | head -n 1 || true)
           AAB=$(find . -name "*.aab" | head -n 1 || true)
-
           test -n "$APK"
-
           echo "APK_PATH=$APK" >> $GITHUB_ENV
           echo "AAB_PATH=$AAB" >> $GITHUB_ENV
 
@@ -153,14 +147,11 @@ jobs:
         run: |
           set -e
           ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-
           APK_KEY="android-emerald/${BUILD_ID}.apk"
           aws s3 cp "$APK_PATH" "s3://${R2_BUCKET}/${APK_KEY}" \
             --endpoint-url "$ENDPOINT" \
             --acl public-read
-
           echo "APK_URL=https://${R2_BUCKET}.r2.dev/${APK_KEY}" >> $GITHUB_ENV
-
           if [ -n "$AAB_PATH" ]; then
             AAB_KEY="android-emerald/${BUILD_ID}.aab"
             aws s3 cp "$AAB_PATH" "s3://${R2_BUCKET}/${AAB_KEY}" \
