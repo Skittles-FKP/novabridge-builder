@@ -105,10 +105,14 @@ jobs:
             -keyalg RSA -keysize 2048 -validity 10000 \
             -dname "CN=Android Debug,O=Android,C=US"
 
+      # ============================================================
+      # 🆕 EMERALD FIX: sync keystore where Gradle expects it
+      # ============================================================
       - name: 🔑 Sync debug.keystore into app module
         run: |
           set -e
           cp ~/.android/debug.keystore "$ANDROID_ROOT/app/debug.keystore"
+          ls -la "$ANDROID_ROOT/app/debug.keystore"
 
       - name: 🧯 Enforce Gradle EMERALD safe mode
         run: |
@@ -133,35 +137,26 @@ jobs:
         run: |
           set -e
           cd "$ANDROID_ROOT"
-          APK=$(find . -name "*.apk" | head -n 1)
+          APK=$(find . -name "*.apk" | head -n 1 || true)
           AAB=$(find . -name "*.aab" | head -n 1 || true)
+          test -n "$APK"
           echo "APK_PATH=$APK" >> $GITHUB_ENV
           echo "AAB_PATH=$AAB" >> $GITHUB_ENV
 
-      # ============================================================
-      # 🆕 EMERALD FIX: HARDENED R2 UPLOAD (incremental only)
-      # ============================================================
       - name: ☁️ Upload artifacts to Cloudflare R2
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: auto
         run: |
           set -e
-          sudo apt-get update && sudo apt-get install -y awscli
-
           ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-
           APK_KEY="android-emerald/${BUILD_ID}.apk"
           aws s3 cp "$APK_PATH" "s3://${R2_BUCKET}/${APK_KEY}" \
-            --endpoint-url "$ENDPOINT"
-
+            --endpoint-url "$ENDPOINT" \
+            --acl public-read
           echo "APK_URL=https://${R2_BUCKET}.r2.dev/${APK_KEY}" >> $GITHUB_ENV
-
           if [ -n "$AAB_PATH" ]; then
             AAB_KEY="android-emerald/${BUILD_ID}.aab"
             aws s3 cp "$AAB_PATH" "s3://${R2_BUCKET}/${AAB_KEY}" \
-              --endpoint-url "$ENDPOINT"
+              --endpoint-url "$ENDPOINT" \
+              --acl public-read
             echo "AAB_URL=https://${R2_BUCKET}.r2.dev/${AAB_KEY}" >> $GITHUB_ENV
           fi
 
