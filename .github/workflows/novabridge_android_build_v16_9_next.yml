@@ -73,7 +73,7 @@ jobs:
           convert -size 48x48 xc:none "$ICON_DIR/ic_launcher_foreground.png"
 
       # ------------------------------------------------------------
-      # Generate clean debug keystore
+      # Generate debug keystore
       # ------------------------------------------------------------
       - name: 🔑 Generate debug keystore
         run: |
@@ -89,42 +89,32 @@ jobs:
             -dname "CN=Android Debug,O=Android,C=US"
 
       # ------------------------------------------------------------
-      # 🔐 Patch signing config (YAML-safe heredoc)
+      # 🔐 Enforce signing config (NO heredoc)
       # ------------------------------------------------------------
       - name: 🔐 Enforce signing config
         run: |
           GRADLE_FILE="extracted/app/build.gradle"
 
-          if ! grep -q "signingConfigs {" "$GRADLE_FILE"; then
-            cat <<'EOF' >> "$GRADLE_FILE"
-
-android {
-    signingConfigs {
-        debug {
-            storeFile file(System.getProperty("user.home") + "/.android/debug.keystore")
-            storePassword "android"
-            keyAlias "androiddebugkey"
-            keyPassword "android"
-        }
-        release {
-            storeFile file(System.getProperty("user.home") + "/.android/debug.keystore")
-            storePassword "android"
-            keyAlias "androiddebugkey"
-            keyPassword "android"
-        }
-    }
-
-    buildTypes {
-        debug {
-            signingConfig signingConfigs.debug
-        }
-        release {
-            signingConfig signingConfigs.release
-        }
-    }
-}
-EOF
-          fi
+          grep -q "signingConfigs" "$GRADLE_FILE" || \
+          sed -i '/android {/a\
+      signingConfigs {\
+          debug {\
+              storeFile file(System.getProperty("user.home") + "/.android/debug.keystore")\
+              storePassword "android"\
+              keyAlias "androiddebugkey"\
+              keyPassword "android"\
+          }\
+          release {\
+              storeFile file(System.getProperty("user.home") + "/.android/debug.keystore")\
+              storePassword "android"\
+              keyAlias "androiddebugkey"\
+              keyPassword "android"\
+          }\
+      }\
+      buildTypes {\
+          debug { signingConfig signingConfigs.debug }\
+          release { signingConfig signingConfigs.release }\
+      }' "$GRADLE_FILE"
 
       # ------------------------------------------------------------
       # Inject plugin dependencies
@@ -133,18 +123,16 @@ EOF
         run: |
           GRADLE_FILE="extracted/app/build.gradle"
 
-          if ! grep -q "play-services-location" "$GRADLE_FILE"; then
+          grep -q "play-services-location" "$GRADLE_FILE" || \
             sed -i '/dependencies {/a\    implementation "com.google.android.gms:play-services-location:21.0.1"' "$GRADLE_FILE"
-          fi
 
-          if ! grep -q "androidx.biometric" "$GRADLE_FILE"; then
+          grep -q "androidx.biometric" "$GRADLE_FILE" || \
             sed -i '/dependencies {/a\    implementation "androidx.biometric:biometric:1.2.0-alpha05"' "$GRADLE_FILE"
-          fi
 
       # ------------------------------------------------------------
       # Build APKs
       # ------------------------------------------------------------
-      - name: 🏗️ Build APKs (Release + Debug)
+      - name: 🏗️ Build APKs
         working-directory: extracted
         run: |
           gradle assembleRelease --no-daemon
@@ -176,22 +164,17 @@ EOF
           path: app/build/outputs/apk/release/app-release.apk
 
       # ------------------------------------------------------------
-      # Callback to Worker
+      # Callback
       # ------------------------------------------------------------
-      - name: ☁️ Notify Worker (callback)
+      - name: ☁️ Notify Worker
         run: |
           curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
-            -d "{
-              \"build_id\": \"${BUILD_ID}\",
-              \"status\": \"success\",
-              \"artifact_apk_url\": \"${CANON_RELEASE_APK}\"
-            }"
+            -d "{\"build_id\":\"${BUILD_ID}\",\"status\":\"success\",\"artifact_apk_url\":\"${CANON_RELEASE_APK}\"}"
 
       # ------------------------------------------------------------
       # Done
       # ------------------------------------------------------------
       - name: ✅ Build completed
-        run: |
-          echo "Android EMERALD build completed successfully"
+        run: echo "Android EMERALD build completed successfully"
