@@ -32,7 +32,7 @@ jobs:
           test -n "$ZIP_URL"
           test -n "$CALLBACK_URL"
 
-      - name: ☕ Setup Java 17 (NO Gradle cache here)
+      - name: ☕ Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -58,8 +58,8 @@ jobs:
           ROOT=$(find work/extracted -name settings.gradle -o -name settings.gradle.kts | head -n 1 | xargs dirname)
           echo "ANDROID_ROOT=$ROOT" >> $GITHUB_ENV
 
-      # ✅ Correct place for Gradle dependency cache (POST-ZIP)
-      - name: 🧱 Setup Gradle (post-ZIP caching)
+      # ✅ Gradle dependency cache ONLY after ZIP exists
+      - name: 🧱 Setup Gradle (post-ZIP)
         uses: gradle/actions/setup-gradle@v3
         with:
           build-root-directory: ${{ env.ANDROID_ROOT }}
@@ -91,16 +91,26 @@ jobs:
             -keyalg RSA -keysize 2048 -validity 10000 \
             -dname "CN=Android Debug,O=Android,C=US"
 
-      # 🔥 FIXED: CONFIGURATION CACHE DISABLED (EMERALD RULE)
-      - name: 🏗 Build APK + AAB (release → debug fallback)
+      # 🧯 EMERALD GRADLE SAFE MODE (CRITICAL)
+      - name: 🧯 Enforce Gradle EMERALD safe mode
+        run: |
+          echo "ORG_GRADLE_CONFIGURATION_CACHE=false" >> $GITHUB_ENV
+          echo "ORG_GRADLE_PARALLEL=false" >> $GITHUB_ENV
+          echo "ORG_GRADLE_DAEMON=false" >> $GITHUB_ENV
+          echo "ORG_GRADLE_CACHING=false" >> $GITHUB_ENV
+
+      # 🔥 HARDENED BUILD (APK + AAB)
+      - name: 🏗 Build APK + AAB (EMERALD hardened)
         run: |
           set -e
           cd "$ANDROID_ROOT"
 
-          if ./gradlew --no-configuration-cache assembleRelease bundleRelease; then
+          GRADLE_FLAGS="--no-daemon --no-parallel --no-build-cache --no-configuration-cache"
+
+          if ./gradlew $GRADLE_FLAGS assembleRelease bundleRelease; then
             echo "VARIANT=release" >> $GITHUB_ENV
           else
-            ./gradlew --no-configuration-cache assembleDebug
+            ./gradlew $GRADLE_FLAGS assembleDebug
             echo "VARIANT=debug" >> $GITHUB_ENV
           fi
 
@@ -134,7 +144,6 @@ jobs:
             aws s3 cp "$AAB_PATH" "s3://${R2_BUCKET}/${AAB_KEY}" \
               --endpoint-url "$ENDPOINT" \
               --acl public-read
-
             echo "AAB_URL=https://${R2_BUCKET}.r2.dev/${AAB_KEY}" >> $GITHUB_ENV
           fi
 
