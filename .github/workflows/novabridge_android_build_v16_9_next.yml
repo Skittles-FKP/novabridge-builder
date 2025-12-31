@@ -21,8 +21,8 @@ jobs:
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       R2_BUCKET: ${{ secrets.R2_BUCKET }}
 
-      # 🔒 EMERALD: AGP 8.2.x SAFE
-      GRADLE_VERSION: 8.2.2
+      # 🔒 EMERALD DIAMOND: supported by setup-gradle
+      GRADLE_VERSION: 8.2.1
 
     steps:
       - name: 🧩 Checkout repository
@@ -63,9 +63,9 @@ jobs:
           echo "ANDROID_ROOT=$ROOT" >> $GITHUB_ENV
 
       # ============================================================
-      # ✅ EMERALD FIX: GitHub-native Gradle install (403-safe)
+      # ✅ EMERALD DIAMOND: Gradle 8.2.1 (SUPPORTED)
       # ============================================================
-      - name: 🧱 Setup Gradle 8.2.2 (EMERALD safe)
+      - name: 🧱 Setup Gradle 8.2.1 (EMERALD DIAMOND)
         uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: ${{ env.GRADLE_VERSION }}
@@ -98,7 +98,7 @@ jobs:
             -keyalg RSA -keysize 2048 -validity 10000 \
             -dname "CN=Android Debug,O=Android,C=US"
 
-      # 🧯 EMERALD GRADLE SAFE MODE (UNCHANGED)
+      # 🧯 EMERALD SAFE MODE
       - name: 🧯 Enforce Gradle EMERALD safe mode
         run: |
           echo "ORG_GRADLE_CONFIGURATION_CACHE=false" >> $GITHUB_ENV
@@ -106,7 +106,7 @@ jobs:
           echo "ORG_GRADLE_DAEMON=false" >> $GITHUB_ENV
           echo "ORG_GRADLE_CACHING=false" >> $GITHUB_ENV
 
-      # 🔥 HARDENED BUILD (APK + AAB)
+      # 🔥 BUILD
       - name: 🏗 Build APK + AAB (EMERALD hardened)
         run: |
           set -e
