@@ -14,11 +14,16 @@ jobs:
     env:
       BUILD_ID: ${{ github.event.client_payload.build_id }}
       ZIP_URL: ${{ github.event.client_payload.zip_url }}
-      CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
+
+      # 🔴 CRITICAL FIX — MUST POINT TO -next WORKER (UI POLLS THIS)
+      CALLBACK_URL: https://novabridge-build-worker-next.novabridge.workers.dev/callback-android-v17
 
     steps:
       - uses: actions/checkout@v4
 
+      # ------------------------------------------------------------
+      # Java + Tooling
+      # ------------------------------------------------------------
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
@@ -35,7 +40,10 @@ jobs:
           echo "$PWD/gradle-8.2.1/bin" >> $GITHUB_PATH
           gradle --version
 
-      - name: Download project
+      # ------------------------------------------------------------
+      # Download + Prepare Project
+      # ------------------------------------------------------------
+      - name: Download project ZIP
         run: |
           curl -L "$ZIP_URL" -o project.zip
           unzip -q project.zip -d extracted
@@ -43,25 +51,24 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Generate adaptive icon
+      - name: Generate adaptive icon (safe)
         run: |
           mkdir -p extracted/app/src/main/res/mipmap-mdpi
           convert -size 48x48 xc:none \
             extracted/app/src/main/res/mipmap-mdpi/ic_launcher_foreground.png
 
       # ------------------------------------------------------------
-      # 🔒 FINAL SIGNING FIX:
-      # Generate the keystore where the project expects it: app/debug.keystore
+      # 🔒 FINAL SIGNING FIX (LOCKED)
       # ------------------------------------------------------------
-      - name: Generate required app debug.keystore (release signing uses it)
+      - name: Reset debug keystore (canonical Android way)
         run: |
           set -e
-          # Always recreate to avoid corrupted / incompatible keystore
           rm -f extracted/app/debug.keystore || true
-          mkdir -p extracted/app
+          mkdir -p ~/.android
+          rm -f ~/.android/debug.keystore
 
           keytool -genkeypair \
-            -keystore extracted/app/debug.keystore \
+            -keystore ~/.android/debug.keystore \
             -storepass android \
             -alias androiddebugkey \
             -keypass android \
@@ -70,32 +77,39 @@ jobs:
             -validity 10000 \
             -dname "CN=Android Debug,O=Android,C=US"
 
-          # Also create canonical location (safe fallback)
-          mkdir -p ~/.android
-          rm -f ~/.android/debug.keystore || true
-          cp extracted/app/debug.keystore ~/.android/debug.keystore
-
+      # ------------------------------------------------------------
+      # Dependency Injection (LOCKED)
+      # ------------------------------------------------------------
       - name: Ensure dependencies block + plugin deps
         run: |
           python - <<'PY'
           import pathlib, re
           p = pathlib.Path("extracted/app/build.gradle")
           text = p.read_text(encoding="utf-8")
+
           if "dependencies" not in text:
               text += "\n\ndependencies {\n}\n"
-          for dep in [
+
+          deps = [
               'implementation "com.google.android.gms:play-services-location:21.0.1"',
               'implementation "androidx.biometric:biometric:1.2.0-alpha05"',
-          ]:
+          ]
+
+          for dep in deps:
               if dep not in text:
                   text = re.sub(
                       r'dependencies\s*\{',
                       lambda m: m.group(0) + "\n    " + dep,
-                      text, count=1
+                      text,
+                      count=1
                   )
+
           p.write_text(text, encoding="utf-8")
           PY
 
+      # ------------------------------------------------------------
+      # Build APKs
+      # ------------------------------------------------------------
       - name: Build APKs (Release + Debug)
         working-directory: extracted
         run: |
@@ -111,41 +125,46 @@ jobs:
           ./gradlew assembleRelease --no-daemon
           ./gradlew assembleDebug --no-daemon
 
+      # ------------------------------------------------------------
+      # Normalize Output Paths
+      # ------------------------------------------------------------
       - name: Normalize APK paths
         run: |
           mkdir -p app/build/outputs/apk/debug
           mkdir -p app/build/outputs/apk/release
+
           cp extracted/app/build/outputs/apk/debug/*.apk \
              app/build/outputs/apk/debug/app-debug.apk
+
           cp extracted/app/build/outputs/apk/release/*.apk \
              app/build/outputs/apk/release/app-release.apk
-          echo "CANON_RELEASE_APK=app/build/outputs/apk/release/app-release.apk" >> $GITHUB_ENV
 
-      - name: Upload Release APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-release-${{ github.event.client_payload.build_id }}
-          path: app/build/outputs/apk/release/app-release.apk
-
-      - name: Upload APK to Worker R2 (enables /download/android-apk/:buildId)
+      # ------------------------------------------------------------
+      # Upload APK to Worker R2  🔑 (TERMINAL TRIGGER)
+      # ------------------------------------------------------------
+      - name: Upload Release APK to NovaBridge Worker (R2)
         run: |
           set -e
-          WORKER_BASE="${CALLBACK_URL%/callback-android-v17}"
-          UPLOAD_URL="$WORKER_BASE/upload/android-apk/${BUILD_ID}"
-          echo "⬆️ Uploading APK to Worker R2: $UPLOAD_URL"
-          curl -X PUT "$UPLOAD_URL" \
-            -H "Content-Type: application/vnd.android.package-archive" \
+          curl --fail-with-body -sS \
+            -X PUT \
+            "https://novabridge-build-worker-next.novabridge.workers.dev/upload/android-apk/${BUILD_ID}" \
             -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
-            --data-binary @app/build/outputs/apk/release/app-release.apk
+            --data-binary "@app/build/outputs/apk/release/app-release.apk"
 
-      - name: Notify Worker
+      # ------------------------------------------------------------
+      # Callback (Secondary Safety Net)
+      # ------------------------------------------------------------
+      - name: Notify Worker (callback)
         run: |
           set -e
-          WORKER_BASE="${CALLBACK_URL%/callback-android-v17}"
-          curl -X POST "$CALLBACK_URL" \
+          curl --fail-with-body -sS \
+            -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
-            -d "{\"build_id\":\"${BUILD_ID}\",\"status\":\"success\",\"artifact_apk_url\":\"${WORKER_BASE}/download/android-apk/${BUILD_ID}\"}"
+            -d "{\"build_id\":\"${BUILD_ID}\",\"status\":\"success\"}"
 
+      # ------------------------------------------------------------
+      # Done
+      # ------------------------------------------------------------
       - name: Done
         run: echo "✅ Android EMERALD build completed successfully"
