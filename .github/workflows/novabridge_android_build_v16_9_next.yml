@@ -88,7 +88,7 @@ jobs:
             -dname "CN=Android Debug,O=Android,C=US"
 
       # ------------------------------------------------------------
-      # 🔒 FIX: Create dependencies block + inject required libs
+      # Ensure dependencies block + inject required libs
       # ------------------------------------------------------------
       - name: Ensure dependencies block + plugin deps
         run: |
@@ -103,16 +103,11 @@ jobs:
               sys.exit("❌ app/build.gradle(.kts) not found")
 
           text = path.read_text(encoding="utf-8")
-
           is_kts = path.suffix == ".kts"
 
-          deps_block = "dependencies {\n}\n" if not is_kts else "dependencies {\n}\n"
-
-          # Ensure dependencies block exists
           if "dependencies" not in text:
-              text += "\n\n" + deps_block
+              text += "\n\ndependencies {\n}\n"
 
-          # Dependencies to enforce
           if is_kts:
               deps = [
                   'implementation("com.google.android.gms:play-services-location:21.0.1")',
@@ -138,12 +133,18 @@ jobs:
           PY
 
       # ------------------------------------------------------------
-      # Build APKs (Release + Debug)
+      # 🔒 FIX: Always run gradlew from extracted/
       # ------------------------------------------------------------
-      - name: Build APKs
+      - name: Build APKs (Release + Debug)
         working-directory: extracted
         run: |
-          chmod +x gradlew
+          set -e
+          if [ ! -f "./gradlew" ]; then
+            echo "❌ gradlew not found in extracted/"
+            ls -la
+            exit 1
+          fi
+          chmod +x ./gradlew
           ./gradlew assembleRelease --no-daemon
           ./gradlew assembleDebug --no-daemon
 
