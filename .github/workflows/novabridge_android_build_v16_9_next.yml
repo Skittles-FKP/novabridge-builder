@@ -127,12 +127,25 @@ jobs:
           name: app-release-${{ github.event.client_payload.build_id }}
           path: app/build/outputs/apk/release/app-release.apk
 
+      - name: Upload APK to Worker R2 (enables /download/android-apk/:buildId)
+        run: |
+          set -e
+          WORKER_BASE="${CALLBACK_URL%/callback-android-v17}"
+          UPLOAD_URL="$WORKER_BASE/upload/android-apk/${BUILD_ID}"
+          echo "⬆️ Uploading APK to Worker R2: $UPLOAD_URL"
+          curl -X PUT "$UPLOAD_URL" \
+            -H "Content-Type: application/vnd.android.package-archive" \
+            -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
+            --data-binary @app/build/outputs/apk/release/app-release.apk
+
       - name: Notify Worker
         run: |
+          set -e
+          WORKER_BASE="${CALLBACK_URL%/callback-android-v17}"
           curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
-            -d "{\"build_id\":\"${BUILD_ID}\",\"status\":\"success\",\"artifact_apk_url\":\"${CANON_RELEASE_APK}\"}"
+            -d "{\"build_id\":\"${BUILD_ID}\",\"status\":\"success\",\"artifact_apk_url\":\"${WORKER_BASE}/download/android-apk/${BUILD_ID}\"}"
 
       - name: Done
         run: echo "✅ Android EMERALD build completed successfully"
