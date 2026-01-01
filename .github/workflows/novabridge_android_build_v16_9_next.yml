@@ -49,9 +49,19 @@ jobs:
           convert -size 48x48 xc:none \
             extracted/app/src/main/res/mipmap-mdpi/ic_launcher_foreground.png
 
-      - name: Generate debug keystore
+      # ------------------------------------------------------------
+      # 🔒 FINAL SIGNING FIX (CRITICAL)
+      # ------------------------------------------------------------
+      - name: Reset debug keystore (canonical Android way)
         run: |
+          set -e
+          echo "🧹 Removing any app-level debug keystore"
+          rm -f extracted/app/debug.keystore || true
+
+          echo "🔑 Recreating ~/.android/debug.keystore"
           mkdir -p ~/.android
+          rm -f ~/.android/debug.keystore
+
           keytool -genkeypair \
             -keystore ~/.android/debug.keystore \
             -storepass android \
@@ -75,32 +85,26 @@ jobs:
               'implementation "androidx.biometric:biometric:1.2.0-alpha05"',
           ]:
               if dep not in text:
-                  text = re.sub(r'dependencies\s*\{',
-                                lambda m: m.group(0) + "\n    " + dep,
-                                text, count=1)
+                  text = re.sub(
+                      r'dependencies\s*\{',
+                      lambda m: m.group(0) + "\n    " + dep,
+                      text, count=1
+                  )
           p.write_text(text, encoding="utf-8")
           PY
 
-      # ------------------------------------------------------------
-      # 🔒 FINAL FIX: Replace stub gradlew with real wrapper
-      # ------------------------------------------------------------
       - name: Build APKs (Release + Debug)
         working-directory: extracted
         run: |
           set -e
-          echo "📂 Project contents:"
-          ls -la
-
           SIZE=$(stat -c%s ./gradlew || echo 0)
           if [ "$SIZE" -lt 1000 ]; then
-            echo "⚠️ gradlew stub detected ($SIZE bytes) — regenerating wrapper"
+            echo "⚠️ gradlew stub detected — regenerating wrapper"
             rm -f gradlew gradlew.bat
             gradle wrapper --gradle-version 8.2.1
           fi
 
           chmod +x ./gradlew
-          ./gradlew --version
-
           ./gradlew assembleRelease --no-daemon
           ./gradlew assembleDebug --no-daemon
 
