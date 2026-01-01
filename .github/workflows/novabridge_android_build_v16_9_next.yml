@@ -100,7 +100,7 @@ jobs:
           p.write_text(text, encoding="utf-8")
           PY
 
-      - name: Build APKs (Release + Debug)
+      - name: Build APKs + AAB (Release + Debug)
         working-directory: extracted
         run: |
           set -e
@@ -112,24 +112,43 @@ jobs:
           fi
 
           chmod +x ./gradlew
+
+          # APKs
           ./gradlew assembleRelease --no-daemon
           ./gradlew assembleDebug --no-daemon
 
-      - name: Normalize APK paths
+          # AAB
+          ./gradlew bundleRelease --no-daemon
+
+      - name: Normalize APK + AAB paths
         run: |
           mkdir -p app/build/outputs/apk/debug
           mkdir -p app/build/outputs/apk/release
+          mkdir -p app/build/outputs/bundle/release
+
           cp extracted/app/build/outputs/apk/debug/*.apk \
              app/build/outputs/apk/debug/app-debug.apk
+
           cp extracted/app/build/outputs/apk/release/*.apk \
              app/build/outputs/apk/release/app-release.apk
-          echo "CANON_RELEASE_APK=app/build/outputs/apk/release/app-release.apk" >> $GITHUB_ENV
 
-      - name: Upload Release APK
+          cp extracted/app/build/outputs/bundle/release/*.aab \
+             app/build/outputs/bundle/release/app-release.aab
+
+          echo "CANON_RELEASE_APK=app/build/outputs/apk/release/app-release.apk" >> $GITHUB_ENV
+          echo "CANON_RELEASE_AAB=app/build/outputs/bundle/release/app-release.aab" >> $GITHUB_ENV
+
+      - name: Upload Release APK (GitHub Artifact)
         uses: actions/upload-artifact@v4
         with:
-          name: app-release-${{ github.event.client_payload.build_id }}
+          name: app-release-apk-${{ github.event.client_payload.build_id }}
           path: app/build/outputs/apk/release/app-release.apk
+
+      - name: Upload Release AAB (GitHub Artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-aab-${{ github.event.client_payload.build_id }}
+          path: app/build/outputs/bundle/release/app-release.aab
 
       - name: Upload Release APK to NovaBridge Worker (R2)
         run: |
@@ -141,6 +160,16 @@ jobs:
             -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
             --data-binary "@app/build/outputs/apk/release/app-release.apk"
 
+      - name: Upload Release AAB to NovaBridge Worker (R2)
+        run: |
+          set -e
+          WORKER_BASE="${CALLBACK_URL%/callback-android-v17}"
+          curl --fail-with-body -sS \
+            -X PUT \
+            "${WORKER_BASE}/upload/android-aab/${BUILD_ID}" \
+            -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
+            --data-binary "@app/build/outputs/bundle/release/app-release.aab"
+
       - name: Notify Worker
         run: |
           set -e
@@ -148,7 +177,7 @@ jobs:
             -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
-            -d "{\"build_id\":\"${BUILD_ID}\",\"status\":\"success\",\"artifact_apk_url\":\"${CANON_RELEASE_APK}\"}"
+            -d "{\"build_id\":\"${BUILD_ID}\",\"status\":\"success\",\"artifact_apk_url\":\"${CANON_RELEASE_APK}\",\"artifact_aab_url\":\"${CANON_RELEASE_AAB}\"}"
 
       - name: Done
-        run: echo "✅ Android EMERALD build completed successfully"
+        run: echo "✅ Android EMERALD build (APK + AAB) completed successfully"
