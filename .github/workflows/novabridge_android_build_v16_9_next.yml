@@ -1,8 +1,10 @@
-name: NovaBridge Android Cloud Build v17 (EMERALD FINAL LOCKED)
+name: NovaBridge Android Cloud Build (EMERALD FINAL LOCKED)
 
 on:
   repository_dispatch:
-    types: [novabridge_android_build_v17_next]
+    types:
+      - novabridge_android_build_v17_next
+      - novabridge_android_build_v16_9_next
 
   workflow_dispatch:
 
@@ -16,29 +18,17 @@ jobs:
       CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
 
     steps:
-      # ------------------------------------------------------------
-      # Checkout
-      # ------------------------------------------------------------
       - uses: actions/checkout@v4
 
-      # ------------------------------------------------------------
-      # Java 17
-      # ------------------------------------------------------------
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
-      # ------------------------------------------------------------
-      # System dependencies
-      # ------------------------------------------------------------
       - name: Install system deps
         run: sudo apt-get update && sudo apt-get install -y imagemagick
 
-      # ------------------------------------------------------------
-      # Gradle 8.2.1
-      # ------------------------------------------------------------
       - name: Install Gradle
         run: |
           curl -fL https://downloads.gradle.org/distributions/gradle-8.2.1-bin.zip -o gradle.zip
@@ -46,32 +36,19 @@ jobs:
           echo "$PWD/gradle-8.2.1/bin" >> $GITHUB_PATH
           gradle --version
 
-      # ------------------------------------------------------------
-      # Download Android project
-      # ------------------------------------------------------------
       - name: Download project
         run: |
           curl -L "$ZIP_URL" -o project.zip
           unzip -q project.zip -d extracted
 
-      # ------------------------------------------------------------
-      # Android SDK
-      # ------------------------------------------------------------
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      # ------------------------------------------------------------
-      # Ensure adaptive icon foreground exists
-      # ------------------------------------------------------------
       - name: Generate adaptive icon
         run: |
           mkdir -p extracted/app/src/main/res/mipmap-mdpi
-          convert -size 48x48 xc:none \
-            extracted/app/src/main/res/mipmap-mdpi/ic_launcher_foreground.png
+          convert -size 48x48 xc:none extracted/app/src/main/res/mipmap-mdpi/ic_launcher_foreground.png
 
-      # ------------------------------------------------------------
-      # Debug keystore (standard Android)
-      # ------------------------------------------------------------
       - name: Generate debug keystore
         run: |
           mkdir -p ~/.android
@@ -85,9 +62,6 @@ jobs:
             -validity 10000 \
             -dname "CN=Android Debug,O=Android,C=US"
 
-      # ------------------------------------------------------------
-      # 🔒 FIX: Deterministic plugin dependency injection
-      # ------------------------------------------------------------
       - name: Inject required plugin dependencies
         run: |
           python - <<'PY'
@@ -115,19 +89,16 @@ jobs:
 
           for dep in deps:
               if dep not in text:
-                  m = re.search(r'dependencies\s*\{', text)
+                  m = re.search(r'dependencies\\s*\\{', text)
                   if not m:
                       raise SystemExit("❌ dependencies { } block not found")
                   i = m.end()
-                  text = text[:i] + "\n    " + dep + text[i:]
+                  text = text[:i] + "\\n    " + dep + text[i:]
 
           path.write_text(text, encoding="utf-8")
           print(f"✅ Dependencies ensured in {path}")
           PY
 
-      # ------------------------------------------------------------
-      # Build APKs (Release + Debug)
-      # ------------------------------------------------------------
       - name: Build APKs
         working-directory: extracted
         run: |
@@ -135,31 +106,20 @@ jobs:
           ./gradlew assembleRelease --no-daemon
           ./gradlew assembleDebug --no-daemon
 
-      # ------------------------------------------------------------
-      # Normalize APK paths (guaranteed)
-      # ------------------------------------------------------------
       - name: Normalize APK paths
         run: |
           mkdir -p app/build/outputs/apk/debug
           mkdir -p app/build/outputs/apk/release
-          cp extracted/app/build/outputs/apk/debug/*.apk \
-             app/build/outputs/apk/debug/app-debug.apk
-          cp extracted/app/build/outputs/apk/release/*.apk \
-             app/build/outputs/apk/release/app-release.apk
+          cp extracted/app/build/outputs/apk/debug/*.apk app/build/outputs/apk/debug/app-debug.apk
+          cp extracted/app/build/outputs/apk/release/*.apk app/build/outputs/apk/release/app-release.apk
           echo "CANON_RELEASE_APK=app/build/outputs/apk/release/app-release.apk" >> $GITHUB_ENV
 
-      # ------------------------------------------------------------
-      # Upload artifact
-      # ------------------------------------------------------------
       - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
           name: app-release-${{ github.event.client_payload.build_id }}
           path: app/build/outputs/apk/release/app-release.apk
 
-      # ------------------------------------------------------------
-      # Callback to Worker
-      # ------------------------------------------------------------
       - name: Notify Worker
         run: |
           curl -X POST "$CALLBACK_URL" \
