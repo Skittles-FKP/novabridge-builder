@@ -143,18 +143,7 @@ jobs:
 
           if [ -z "$ENTITLEMENTS" ]; then
             ENTITLEMENTS="$(dirname "$INFO_PLIST")/NovaBridge.entitlements"
-            python3 - <<PY
-p = r"""$ENTITLEMENTS"""
-xml = """<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict/>
-</plist>
-"""
-with open(p, "w", encoding="utf-8") as f:
-    f.write(xml)
-print("✅ Created entitlements:", p)
-PY
+            python3 -c "p=r'''$ENTITLEMENTS'''; xml='''<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict/>\n</plist>\n'''; open(p,'w',encoding='utf-8').write(xml); print('✅ Created entitlements:', p)"
           fi
 
           echo "✅ INFO_PLIST=$INFO_PLIST"
