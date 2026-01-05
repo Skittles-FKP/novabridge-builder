@@ -129,6 +129,7 @@ jobs:
       # 🧩 5️⃣b Inject iOS plugins (NEXT ONLY — ADDITIVE)
       # ------------------------------------------------------------
       - name: Inject iOS plugins (Info.plist + entitlements)
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -142,19 +143,28 @@ jobs:
 
           if [ -z "$ENTITLEMENTS" ]; then
             ENTITLEMENTS="$(dirname "$INFO_PLIST")/NovaBridge.entitlements"
-            cat > "$ENTITLEMENTS" <<'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
+            python3 - <<PY
+p = r"""$ENTITLEMENTS"""
+xml = """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict/>
 </plist>
-EOF
+"""
+with open(p, "w", encoding="utf-8") as f:
+    f.write(xml)
+print("✅ Created entitlements:", p)
+PY
           fi
 
-          pushd tools/ios-plugins
+          echo "✅ INFO_PLIST=$INFO_PLIST"
+          echo "✅ ENTITLEMENTS=$ENTITLEMENTS"
+          echo "✅ PLUGINS_JSON=$PLUGINS_JSON"
+
+          pushd tools/ios-plugins >/dev/null
           npm install --no-audit --no-fund
           npx tsc
-          popd
+          popd >/dev/null
 
           node tools/ios-plugins/dist/injectIosPlugins.js \
             --infoPlist "$INFO_PLIST" \
