@@ -14,7 +14,7 @@ jobs:
       BUILD_ID: ${{ github.event.client_payload.build_id }}
       ZIP_URL: ${{ github.event.client_payload.zip_url }}
       CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
-      PLUGINS_JSON: ${{ toJson(github.event.client_payload.plugins || {}) }}
+      RAW_PLUGINS: ${{ toJson(github.event.client_payload.plugins) }}
 
     steps:
       # ------------------------------------------------------------
@@ -68,9 +68,14 @@ jobs:
         run: |
           set -e
 
+          # Fallback to empty JSON if plugins missing
+          PLUGINS_JSON="$RAW_PLUGINS"
+          if [ -z "$PLUGINS_JSON" ] || [ "$PLUGINS_JSON" = "null" ]; then
+            PLUGINS_JSON="{}"
+          fi
+
           echo "🔌 Applying iOS plugins: $PLUGINS_JSON"
 
-          # Ensure entitlements file exists
           if [ ! -f "$IOS_DIR/App.entitlements" ]; then
             echo '<?xml version="1.0" encoding="UTF-8"?>' > "$IOS_DIR/App.entitlements"
             echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' >> "$IOS_DIR/App.entitlements"
