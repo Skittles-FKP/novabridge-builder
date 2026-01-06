@@ -1,4 +1,4 @@
-name: NovaBridge iOS NEXT Cloud Build
+name: NovaBridge iOS NEXT Build
 
 on:
   repository_dispatch:
@@ -14,116 +14,141 @@ jobs:
       BUILD_ID: ${{ github.event.client_payload.build_id }}
       ZIP_URL: ${{ github.event.client_payload.zip_url }}
       CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
-      PLUGINS_JSON: ${{ github.event.client_payload.plugins || '{}' }}
+      PLUGINS_JSON: ${{ toJson(github.event.client_payload.plugins || {}) }}
 
     steps:
       # ------------------------------------------------------------
-      # 1️⃣ Checkout
+      # 0️⃣ Checkout
       # ------------------------------------------------------------
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       # ------------------------------------------------------------
-      # 2️⃣ Download iOS ZIP
+      # 1️⃣ Download iOS ZIP
       # ------------------------------------------------------------
       - name: Download iOS ZIP
         run: |
           set -e
           mkdir -p work
-          curl -L "$ZIP_URL" -o work/source.zip
+          curl -L "$ZIP_URL" -o work/app.zip
+          unzip -q work/app.zip -d work/app
+
+          curl -s -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
+            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 3, \"step_state\": \"done\", \"log\": \"iOS NEXT: ZIP downloaded\" }"
 
       # ------------------------------------------------------------
-      # 3️⃣ Extract ZIP
+      # 2️⃣ Locate iOS project directory
       # ------------------------------------------------------------
-      - name: Extract iOS ZIP
+      - name: Locate iOS project
         run: |
           set -e
-          unzip -q work/source.zip -d work/app
+          IOS_DIR=$(find work/app -name Info.plist | head -n 1 | xargs dirname)
+          if [ -z "$IOS_DIR" ]; then
+            echo "❌ No iOS project directory found"
+            exit 1
+          fi
+          echo "IOS_DIR=$IOS_DIR" >> $GITHUB_ENV
 
       # ------------------------------------------------------------
-      # 🧩 Apply iOS plugins (NEXT only)
+      # 3️⃣ Install iOS plugin injector (NEXT only)
+      # ------------------------------------------------------------
+      - name: Install iOS plugin injector
+        run: |
+          set -e
+          cd tools/ios-plugins
+          npm ci
+          npx tsc
+          cd -
+
+      # ------------------------------------------------------------
+      # 4️⃣ Apply iOS plugins (Info.plist + entitlements)
       # ------------------------------------------------------------
       - name: Apply iOS plugins
         run: |
           set -e
+
           echo "🔌 Applying iOS plugins: $PLUGINS_JSON"
 
-          if [ ! -f work/app/App/App.entitlements ]; then
-            echo '<?xml version="1.0" encoding="UTF-8"?>' > work/app/App/App.entitlements
-            echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' >> work/app/App/App.entitlements
-            echo '<plist version="1.0"><dict></dict></plist>' >> work/app/App/App.entitlements
+          # Ensure entitlements file exists
+          if [ ! -f "$IOS_DIR/App.entitlements" ]; then
+            echo '<?xml version="1.0" encoding="UTF-8"?>' > "$IOS_DIR/App.entitlements"
+            echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' >> "$IOS_DIR/App.entitlements"
+            echo '<plist version="1.0"><dict></dict></plist>' >> "$IOS_DIR/App.entitlements"
           fi
 
-          node tools/ios-plugins/injectIosPlugins.js \
-            --infoPlist work/app/App/Info.plist \
-            --entitlements work/app/App/App.entitlements \
+          node tools/ios-plugins/dist/injectIosPlugins.js \
+            --infoPlist "$IOS_DIR/Info.plist" \
+            --entitlements "$IOS_DIR/App.entitlements" \
             --plugins "$PLUGINS_JSON"
 
-      # ------------------------------------------------------------
-      # 4️⃣ Install XcodeGen
-      # ------------------------------------------------------------
-      - name: Install XcodeGen
-        run: |
-          brew install xcodegen
+          curl -s -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
+            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 4, \"step_state\": \"done\", \"log\": \"iOS NEXT: Plugins applied\" }"
 
       # ------------------------------------------------------------
-      # 5️⃣ Generate Xcode Project
+      # 5️⃣ Generate Xcode project (XcodeGen)
       # ------------------------------------------------------------
       - name: Generate Xcode project
         run: |
           set -e
-          cd work/app
-          xcodegen generate
+          brew install xcodegen
+          cd "$IOS_DIR"
+          xcodegen
+
+          curl -s -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
+            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 5, \"step_state\": \"done\", \"log\": \"iOS NEXT: Xcode project generated\" }"
 
       # ------------------------------------------------------------
-      # 6️⃣ Build with Xcode
+      # 6️⃣ Resolve Xcode target
       # ------------------------------------------------------------
-      - name: Build iOS app
+      - name: Resolve Xcode target
         run: |
           set -e
-          cd work/app
-          xcodebuild \
-            -project *.xcodeproj \
-            -scheme * \
-            -configuration Release \
-            -sdk iphoneos \
-            build \
-            CODE_SIGNING_ALLOWED=NO
+          TARGET=$(xcodebuild -list -json | jq -r '.project.targets[0]')
+          echo "XCODE_TARGET=$TARGET" >> $GITHUB_ENV
 
       # ------------------------------------------------------------
-      # 7️⃣ Package iOS artifact ZIP
+      # 7️⃣ Build with Xcode (unsigned)
+      # ------------------------------------------------------------
+      - name: Build with Xcode
+        run: |
+          set -e
+          cd "$IOS_DIR"
+          xcodebuild \
+            -project *.xcodeproj \
+            -scheme "$XCODE_TARGET" \
+            -configuration Release \
+            -sdk iphoneos \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+          curl -s -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
+            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 6, \"step_state\": \"done\", \"log\": \"iOS NEXT: Build completed\" }"
+
+      # ------------------------------------------------------------
+      # 8️⃣ Package iOS artifact (ZIP)
       # ------------------------------------------------------------
       - name: Package iOS artifact
         run: |
           set -e
           cd work
-          zip -qr ios-artifact.zip app
-          echo "📦 iOS NEXT artifact packaged"
+          zip -r ios-build.zip app
 
       # ------------------------------------------------------------
-      # 8️⃣ Upload ZIP back to iOS NEXT Worker
+      # 9️⃣ Upload artifact to NEXT worker
       # ------------------------------------------------------------
-      - name: Upload iOS artifact to NEXT worker
+      - name: Upload artifact
         run: |
           set -e
-
-          WORKER_BASE_URL="$(echo "$CALLBACK_URL" | sed 's|/callback-ios||')"
-
-          curl -sS -X PUT \
-            -H "x-novabridge-token: ${{ secrets.ARTIFACT_UPLOAD_TOKEN || secrets.CALLBACK_TOKEN }}" \
-            --data-binary @work/ios-artifact.zip \
-            "$WORKER_BASE_URL/upload-artifact-ios/${BUILD_ID}"
-
-      # ------------------------------------------------------------
-      # 9️⃣ Notify Worker (final callback)
-      # ------------------------------------------------------------
-      - name: Notify iOS NEXT worker
-        run: |
-          set -e
-          curl -sS -X POST "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
+          curl -X POST "$CALLBACK_URL/upload-ios-zip/$BUILD_ID" \
             -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
-            -d "{\"build_id\":\"${BUILD_ID}\",\"status\":\"success\"}"
+            --data-binary "@work/ios-build.zip"
 
       # ------------------------------------------------------------
       # ✅ Done
