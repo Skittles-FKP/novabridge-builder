@@ -14,7 +14,6 @@ jobs:
       BUILD_ID: ${{ github.event.client_payload.build_id }}
       ZIP_URL: ${{ github.event.client_payload.zip_url }}
       CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
-      # Plugins JSON passed through from UI / worker (safe default)
       PLUGINS_JSON: ${{ github.event.client_payload.plugins || '{}' }}
 
     steps:
@@ -25,7 +24,7 @@ jobs:
         uses: actions/checkout@v4
 
       # ------------------------------------------------------------
-      # 2️⃣ Download iOS ZIP from Worker
+      # 2️⃣ Download iOS ZIP
       # ------------------------------------------------------------
       - name: Download iOS ZIP
         run: |
@@ -42,14 +41,13 @@ jobs:
           unzip -q work/source.zip -d work/app
 
       # ------------------------------------------------------------
-      # 🧩 NEW — Apply iOS Plugins (Info.plist + Entitlements)
+      # 🧩 Apply iOS plugins (NEXT only)
       # ------------------------------------------------------------
-      - name: Apply iOS plugins (NEXT only)
+      - name: Apply iOS plugins
         run: |
           set -e
           echo "🔌 Applying iOS plugins: $PLUGINS_JSON"
 
-          # Ensure entitlements file exists
           if [ ! -f work/app/App/App.entitlements ]; then
             echo '<?xml version="1.0" encoding="UTF-8"?>' > work/app/App/App.entitlements
             echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' >> work/app/App/App.entitlements
@@ -93,7 +91,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO
 
       # ------------------------------------------------------------
-      # 7️⃣ Package iOS Artifact ZIP
+      # 7️⃣ Package iOS artifact ZIP
       # ------------------------------------------------------------
       - name: Package iOS artifact
         run: |
@@ -103,20 +101,23 @@ jobs:
           echo "📦 iOS NEXT artifact packaged"
 
       # ------------------------------------------------------------
-      # 8️⃣ Upload ZIP back to iOS NEXT Worker (R2)
+      # 8️⃣ Upload ZIP back to iOS NEXT Worker
       # ------------------------------------------------------------
       - name: Upload iOS artifact to NEXT worker
         run: |
           set -e
+
+          WORKER_BASE_URL="$(echo "$CALLBACK_URL" | sed 's|/callback-ios||')"
+
           curl -sS -X PUT \
             -H "x-novabridge-token: ${{ secrets.ARTIFACT_UPLOAD_TOKEN || secrets.CALLBACK_TOKEN }}" \
             --data-binary @work/ios-artifact.zip \
-            "${{ github.event.client_payload.callback_url | replace('/callback-ios','') }}/upload-artifact-ios/${BUILD_ID}"
+            "$WORKER_BASE_URL/upload-artifact-ios/${BUILD_ID}"
 
       # ------------------------------------------------------------
       # 9️⃣ Notify Worker (final callback)
       # ------------------------------------------------------------
-      - name: Notify iOS NEXT worker (final)
+      - name: Notify iOS NEXT worker
         run: |
           set -e
           curl -sS -X POST "$CALLBACK_URL" \
