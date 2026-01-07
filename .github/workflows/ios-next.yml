@@ -14,7 +14,7 @@ jobs:
       BUILD_ID: ${{ github.event.client_payload.build_id }}
       ZIP_URL: ${{ github.event.client_payload.zip_url }}
       CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
-      PLUGINS_JSON: ${{ github.event.client_payload.plugins_json || '{}' }}
+      PLUGINS_JSON: ${{ github.event.client_payload.plugins_json }}
 
     steps:
       # ------------------------------------------------------------
@@ -24,7 +24,7 @@ jobs:
         uses: actions/checkout@v4
 
       # ------------------------------------------------------------
-      # 2️⃣ Setup Node (for plugin injector)
+      # 2️⃣ Setup Node (plugin injector)
       # ------------------------------------------------------------
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -42,18 +42,29 @@ jobs:
           unzip -q ios.zip -d work
 
       # ------------------------------------------------------------
-      # 4️⃣ Locate iOS project directory
+      # 4️⃣ Locate Xcode project + IOS_DIR (FIXED)
       # ------------------------------------------------------------
       - name: Locate iOS project directory
+        shell: bash
         run: |
           set -e
-          IOS_DIR=$(find work -maxdepth 3 -type d -name "*.xcodeproj" | sed 's|/[^/]*$||' | head -n 1)
-          if [ -z "$IOS_DIR" ]; then
-            echo "❌ No iOS project directory found"
+
+          echo "🔍 Searching for .xcodeproj…"
+          XCODEPROJ=$(find work -type d -name "*.xcodeproj" | head -n 1)
+
+          if [ -z "$XCODEPROJ" ]; then
+            echo "❌ No .xcodeproj found anywhere in ZIP"
+            find work -maxdepth 4 -type d
             exit 1
           fi
-          echo "IOS_DIR=$IOS_DIR" >> $GITHUB_ENV
+
+          IOS_DIR="$(dirname "$XCODEPROJ")"
+
+          echo "✅ Found Xcode project: $XCODEPROJ"
           echo "📁 iOS dir: $IOS_DIR"
+
+          echo "XCODEPROJ=$XCODEPROJ" >> $GITHUB_ENV
+          echo "IOS_DIR=$IOS_DIR" >> $GITHUB_ENV
 
       # ------------------------------------------------------------
       # 5️⃣ Apply iOS plugins (Info.plist + entitlements)
@@ -61,73 +72,56 @@ jobs:
       - name: Apply iOS plugins
         run: |
           set -e
-          echo "🔌 Applying iOS plugins: $PLUGINS_JSON"
+          echo "🔌 Applying iOS plugins: ${PLUGINS_JSON:-{}}"
 
           node tools/ios-plugins/dist/injectIosPlugins.js \
             --infoPlist "$IOS_DIR/Info.plist" \
             --entitlements "$IOS_DIR/App.entitlements" \
-            --plugins "$PLUGINS_JSON"
+            --plugins "${PLUGINS_JSON:-{}}"
 
       # ------------------------------------------------------------
-      # 6️⃣ Resolve Xcode project + scheme (ROBUST FIX)
+      # 6️⃣ Resolve scheme (ROBUST)
       # ------------------------------------------------------------
-      - name: Resolve Xcode project + scheme
+      - name: Resolve Xcode scheme
         shell: bash
         run: |
           set -e
 
-          XCODEPROJ=$(find "$IOS_DIR" -name "*.xcodeproj" | head -n 1)
-          if [ -z "$XCODEPROJ" ]; then
-            echo "❌ No .xcodeproj found"
-            exit 1
-          fi
-
           echo "🧾 xcodebuild -list output:"
           xcodebuild -list -project "$XCODEPROJ"
 
-          SCHEMES=$(xcodebuild -list -project "$XCODEPROJ" | python3 - <<'PY'
+          SCHEME=$(xcodebuild -list -project "$XCODEPROJ" | python3 - <<'PY'
           import sys
-
           lines = sys.stdin.read().splitlines()
-          schemes = []
           capture = False
+          schemes = []
 
-          for line in lines:
-              if line.strip() == "Schemes:":
+          for l in lines:
+              if l.strip() == "Schemes:":
                   capture = True
                   continue
               if capture:
-                  if line.strip() == "":
-                      continue
-                  if not line.startswith(" "):
+                  if not l.startswith(" "):
                       break
-                  schemes.append(line.strip())
+                  if l.strip():
+                      schemes.append(l.strip())
 
-          for s in schemes:
-              print(s)
+          print(schemes[0] if schemes else "")
           PY
           )
 
-          if [ -z "$SCHEMES" ]; then
-            echo "❌ No schemes found"
+          if [ -z "$SCHEME" ]; then
+            echo "❌ No scheme detected"
             exit 1
           fi
 
-          APP_NAME="$(basename "$XCODEPROJ" .xcodeproj)"
-          PICK=$(echo "$SCHEMES" | grep -i -m1 "^$APP_NAME$" || true)
-          if [ -z "$PICK" ]; then
-            PICK=$(echo "$SCHEMES" | head -n 1)
-          fi
-
-          echo "XCODEPROJ=$XCODEPROJ" >> "$GITHUB_ENV"
-          echo "SCHEME=$PICK" >> "$GITHUB_ENV"
-
-          echo "✅ Selected scheme: $PICK"
+          echo "SCHEME=$SCHEME" >> $GITHUB_ENV
+          echo "✅ Using scheme: $SCHEME"
 
       # ------------------------------------------------------------
       # 7️⃣ Build with Xcode (unsigned)
       # ------------------------------------------------------------
-      - name: Build iOS app (Xcode)
+      - name: Build iOS app
         run: |
           set -e
 
@@ -145,12 +139,11 @@ jobs:
       - name: Package iOS build output
         run: |
           set -e
-          mkdir -p artifact
           zip -qr ios-build-${BUILD_ID}.zip "$IOS_DIR"
           echo "ARTIFACT=ios-build-${BUILD_ID}.zip" >> $GITHUB_ENV
 
       # ------------------------------------------------------------
-      # 9️⃣ Upload artifact to GitHub
+      # 9️⃣ Upload artifact
       # ------------------------------------------------------------
       - name: Upload iOS ZIP artifact
         uses: actions/upload-artifact@v4
@@ -159,7 +152,7 @@ jobs:
           path: ios-build-${{ env.BUILD_ID }}.zip
 
       # ------------------------------------------------------------
-      # 🔟 Notify Worker (terminal = true)
+      # 🔟 Notify Worker (terminal flip)
       # ------------------------------------------------------------
       - name: Notify iOS Worker
         run: |
