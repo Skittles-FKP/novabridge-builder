@@ -171,7 +171,7 @@ jobs:
           xcodegen generate
 
       # ------------------------------------------------------------
-      # 🔥 9️⃣ Resolve Xcode project + scheme (ROBUST FIX)
+      # 🔥 9️⃣ Resolve Xcode project + scheme (FIXED)
       # ------------------------------------------------------------
       - name: Resolve Xcode project + scheme
         shell: bash
@@ -185,23 +185,28 @@ jobs:
           fi
 
           echo "🧾 xcodebuild -list output:"
-          xcodebuild -list -project "$XCODEPROJ" || true
+          xcodebuild -list -project "$XCODEPROJ"
 
           SCHEMES=$(xcodebuild -list -project "$XCODEPROJ" | python3 - <<'PY'
           import sys
           lines = sys.stdin.read().splitlines()
           out = []
           in_schemes = False
+
           for line in lines:
-            if line.strip() == "Schemes:":
-              in_schemes = True
-              continue
-            if in_schemes:
-              if not line.strip():
-                continue
-              if line.strip().endswith(":"):
-                break
-              out.append(line.strip())
+              if line.strip() == "Schemes:":
+                  in_schemes = True
+                  continue
+
+              if in_schemes:
+                  # schemes are indented
+                  if line.startswith("        "):
+                      out.append(line.strip())
+                  elif line.strip() == "":
+                      continue
+                  else:
+                      break
+
           print("\n".join(out))
           PY
           )
