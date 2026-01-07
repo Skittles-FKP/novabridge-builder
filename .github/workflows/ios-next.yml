@@ -104,7 +104,7 @@ jobs:
           echo "📁 IOS_DIR=$IOS_DIR"
 
       # ------------------------------------------------------------
-      # 7️⃣ Apply iOS plugins (GUARANTEED VALID JSON)
+      # 7️⃣ Apply iOS plugins (FIXED npm execution)
       # ------------------------------------------------------------
       - name: Apply iOS plugins
         shell: bash
@@ -115,7 +115,7 @@ jobs:
 
           cd tools/ios-plugins
           npm ci || npm install
-          npx --yes typescript@5.6.3 tsc
+          npm run build
           cd ../..
 
           INFO_PLIST=$(find "$IOS_DIR" -type f -name "Info.plist" | head -n 1)
