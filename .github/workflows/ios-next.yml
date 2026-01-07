@@ -132,7 +132,7 @@ jobs:
           xcodegen generate
 
       # ------------------------------------------------------------
-      # 9️⃣ Resolve scheme (FULL NAME, SPACES SAFE)
+      # 9️⃣ Resolve scheme (FIXED — indentation safe + fallback)
       # ------------------------------------------------------------
       - name: Resolve scheme
         shell: bash
@@ -142,33 +142,38 @@ jobs:
           XCODEPROJ=$(find "$IOS_DIR" -type d -name "*.xcodeproj" | head -n 1)
 
           echo "🧾 xcodebuild -list:"
-          xcodebuild -list -project "$XCODEPROJ"
+          LIST="$(xcodebuild -list -project "$XCODEPROJ")"
+          echo "$LIST"
 
-          SCHEME=$(xcodebuild -list -project "$XCODEPROJ" | python3 - <<'PY'
+          SCHEME=$(python3 - <<'PY'
           import sys
-          lines=sys.stdin.read().splitlines()
-          grab=False
-          for l in lines:
-              if l.strip()=="Schemes:":
-                  grab=True
+
+          text = sys.stdin.read().splitlines()
+          grab = False
+
+          for line in text:
+              if line.strip() == "Schemes:":
+                  grab = True
                   continue
               if grab:
-                  if not l.startswith(" "): break
-                  s=l.strip()
+                  s = line.strip()
                   if s:
                       print(s)
                       break
           PY
-          )
+          <<< "$LIST")
 
-          [ -n "$SCHEME" ] || (echo "❌ No scheme found" && exit 1)
+          if [ -z "$SCHEME" ]; then
+            SCHEME="$(basename "$XCODEPROJ" .xcodeproj)"
+            echo "⚠️ Scheme not parsed; falling back to project name: $SCHEME"
+          fi
 
           echo "XCODEPROJ=$XCODEPROJ" >> "$GITHUB_ENV"
           echo "SCHEME=$SCHEME" >> "$GITHUB_ENV"
           echo "✅ Using scheme: $SCHEME"
 
       # ------------------------------------------------------------
-      # 🔟 Build with Xcode (SCHEME FIXED)
+      # 🔟 Build with Xcode
       # ------------------------------------------------------------
       - name: Build with Xcode
         run: |
