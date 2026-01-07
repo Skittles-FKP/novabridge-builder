@@ -67,14 +67,23 @@ jobs:
           [ -n "$CALLBACK_URL" ] || (echo "Missing CALLBACK_URL" && exit 1)
 
       # ------------------------------------------------------------
-      # 4️⃣ Download iOS ZIP
+      # 4️⃣ Download iOS ZIP (SOURCE OF TRUTH = PAYLOAD URL)
       # ------------------------------------------------------------
       - name: Download iOS ZIP
         run: |
           set -e
+          echo "⬇️ Downloading iOS ZIP from payload URL:"
+          echo "$ZIP_URL"
+
           rm -rf work
           mkdir -p work
-          curl -L "$ZIP_URL" -o ios.zip
+
+          curl -fL "$ZIP_URL" -o ios.zip
+
+          echo "📦 ZIP file info:"
+          file ios.zip
+
+          unzip -t ios.zip
           unzip -q ios.zip -d work
 
       # ------------------------------------------------------------
@@ -101,7 +110,7 @@ jobs:
           echo "✅ IOS_DIR=$IOS_DIR"
 
       # ------------------------------------------------------------
-      # 7️⃣ Apply iOS plugins (Info.plist + entitlements)
+      # 7️⃣ Apply iOS plugins
       # ------------------------------------------------------------
       - name: Apply iOS plugins
         run: |
@@ -138,7 +147,7 @@ jobs:
           xcodegen generate
 
       # ------------------------------------------------------------
-      # 9️⃣ Resolve scheme (indentation-safe + fallback)
+      # 9️⃣ Resolve scheme (robust)
       # ------------------------------------------------------------
       - name: Resolve scheme
         shell: bash
@@ -146,22 +155,20 @@ jobs:
           set -e
 
           XCODEPROJ=$(find "$IOS_DIR" -type d -name "*.xcodeproj" | head -n 1)
-          [ -n "$XCODEPROJ" ] || (echo "❌ No .xcodeproj found after xcodegen" && exit 1)
+          [ -n "$XCODEPROJ" ] || (echo "❌ No .xcodeproj found" && exit 1)
 
-          echo "🧾 xcodebuild -list:"
           LIST="$(xcodebuild -list -project "$XCODEPROJ")"
           echo "$LIST"
 
           SCHEME=$(python3 - <<'PY'
           import sys
-          text = sys.stdin.read().splitlines()
-          grab = False
-          for line in text:
-              if line.strip() == "Schemes:":
-                  grab = True
+          grab=False
+          for l in sys.stdin.read().splitlines():
+              if l.strip()=="Schemes:":
+                  grab=True
                   continue
               if grab:
-                  s = line.strip()
+                  s=l.strip()
                   if s:
                       print(s)
                       break
@@ -170,7 +177,7 @@ jobs:
 
           if [ -z "$SCHEME" ]; then
             SCHEME="$(basename "$XCODEPROJ" .xcodeproj)"
-            echo "⚠️ Scheme not parsed; falling back to project name: $SCHEME"
+            echo "⚠️ Falling back to project name as scheme: $SCHEME"
           fi
 
           echo "XCODEPROJ=$XCODEPROJ" >> "$GITHUB_ENV"
@@ -201,7 +208,7 @@ jobs:
           zip -qr "$GITHUB_WORKSPACE/ios-build-${BUILD_ID}.zip" .
 
       # ------------------------------------------------------------
-      # 1️⃣2️⃣ Upload artifact to GitHub (kept for debugging)
+      # 1️⃣2️⃣ Upload artifact to GitHub (debug/history)
       # ------------------------------------------------------------
       - name: Upload artifact to GitHub
         uses: actions/upload-artifact@v4
@@ -210,32 +217,26 @@ jobs:
           path: ios-build-${{ env.BUILD_ID }}.zip
 
       # ------------------------------------------------------------
-      # 1️⃣3️⃣ Upload ZIP to Worker R2 (this powers UI download)
+      # 1️⃣3️⃣ Upload ZIP to Worker R2 (UI DOWNLOAD SOURCE)
       # ------------------------------------------------------------
       - name: Upload ZIP to Worker (R2)
-        shell: bash
         run: |
-          set -euo pipefail
-
-          # CALLBACK_URL is like: https://<worker>/callback-ios
+          set -e
           WORKER_BASE="${CALLBACK_URL%/callback-ios}"
-          WORKER_BASE="${WORKER_BASE%/}"  # trim trailing slash if any
+          WORKER_BASE="${WORKER_BASE%/}"
 
-          echo "✅ WORKER_BASE=$WORKER_BASE"
-          echo "⬆️ Uploading ZIP to: $WORKER_BASE/upload-artifact-ios/$BUILD_ID"
-
-          curl -sS -X PUT "$WORKER_BASE/upload-artifact-ios/$BUILD_ID" \
+          curl -X PUT "$WORKER_BASE/upload-artifact-ios/$BUILD_ID" \
             -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
             -H "Content-Type: application/zip" \
             --data-binary "@ios-build-${BUILD_ID}.zip"
 
       # ------------------------------------------------------------
-      # 1️⃣4️⃣ Notify Worker (terminal flip; safe if already terminal)
+      # 1️⃣4️⃣ Notify Worker (terminal flip)
       # ------------------------------------------------------------
       - name: Notify Worker
         run: |
           set -e
-          curl -sS -X POST "$CALLBACK_URL" \
+          curl -X POST "$CALLBACK_URL" \
             -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
             -H "Content-Type: application/json" \
             -d "{\"build_id\":\"$BUILD_ID\",\"status\":\"success\",\"terminal\":true}"
