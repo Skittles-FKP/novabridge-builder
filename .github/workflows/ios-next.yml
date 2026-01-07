@@ -2,137 +2,272 @@ name: NovaBridge iOS NEXT Build
 
 on:
   repository_dispatch:
-    types:
-      - novabridge_ios_build_next
+    types: [novabridge_ios_build_next]
   workflow_dispatch:
 
 jobs:
   ios-next-build:
     runs-on: macos-latest
-
-    env:
-      BUILD_ID: ${{ github.event.client_payload.build_id }}
-      ZIP_URL: ${{ github.event.client_payload.zip_url }}
-      CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
-      RAW_PLUGINS: ${{ toJson(github.event.client_payload.plugins) }}
+    timeout-minutes: 45
 
     steps:
-      # ------------------------------------------------------------
-      # 0️⃣ Checkout
-      # ------------------------------------------------------------
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       # ------------------------------------------------------------
-      # 1️⃣ Download iOS ZIP
+      # 0️⃣ Extract payload safely (NO GitHub expression tricks)
       # ------------------------------------------------------------
-      - name: Download iOS ZIP
+      - name: Extract dispatch payload
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import json, os
+          p = os.environ["GITHUB_EVENT_PATH"]
+          ev = json.load(open(p, "r", encoding="utf-8"))
+
+          cp = (ev.get("client_payload") or {})
+          build_id = cp.get("build_id") or cp.get("buildId") or ""
+          zip_url = cp.get("zip_url") or cp.get("zipUrl") or ""
+          callback_url = cp.get("callback_url") or cp.get("callbackUrl") or ""
+          plugins = cp.get("plugins") or {}
+          # Allow plugins to be passed as a JSON string too
+          if isinstance(plugins, str):
+            try:
+              plugins = json.loads(plugins)
+            except Exception:
+              plugins = {}
+
+          # defaults (safe)
+          if not isinstance(plugins, dict):
+            plugins = {}
+
+          out = {
+            "BUILD_ID": build_id,
+            "ZIP_URL": zip_url,
+            "CALLBACK_URL": callback_url,
+            "PLUGINS_JSON": json.dumps(plugins, separators=(",", ":")),
+          }
+
+          env_path = os.environ["GITHUB_ENV"]
+          with open(env_path, "a", encoding="utf-8") as f:
+            for k,v in out.items():
+              f.write(f"{k}={v}\n")
+
+          print("✅ Payload extracted:")
+          print(json.dumps(out, indent=2))
+          PY
+
+          if [ -z "${BUILD_ID:-}" ] || [ -z "${ZIP_URL:-}" ] || [ -z "${CALLBACK_URL:-}" ]; then
+            echo "❌ Missing required payload values (BUILD_ID / ZIP_URL / CALLBACK_URL)"
+            exit 1
+          fi
+
+      # ------------------------------------------------------------
+      # 🔐 Ensure callback token exists
+      # ------------------------------------------------------------
+      - name: Verify CALLBACK_TOKEN present
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${{ secrets.CALLBACK_TOKEN }}" ]; then
+            echo "❌ CALLBACK_TOKEN secret is missing/empty"
+            exit 1
+          fi
+          echo "✅ CALLBACK_TOKEN present"
+
+      # ------------------------------------------------------------
+      # 2️⃣ GitHub Dispatched (UI step)
+      # ------------------------------------------------------------
+      - name: Mark GitHub dispatched (Step 2)
+        shell: bash
         run: |
           set -e
+          curl -s -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
+            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 2, \"step_state\": \"done\", \"log\": \"iOS NEXT: ✅ GitHub workflow started\" }" >/dev/null || true
+
+      # ------------------------------------------------------------
+      # 3️⃣ Download iOS ZIP
+      # ------------------------------------------------------------
+      - name: Download iOS ZIP (Step 3)
+        shell: bash
+        run: |
+          set -e
+          curl -L "$ZIP_URL" -o ios.zip
+          rm -rf work
           mkdir -p work
-          curl -L "$ZIP_URL" -o work/app.zip
-          unzip -q work/app.zip -d work/app
+          unzip -q ios.zip -d work
 
           curl -s -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
-            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 3, \"step_state\": \"done\", \"log\": \"iOS NEXT: ZIP downloaded\" }"
+            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 3, \"step_state\": \"done\", \"log\": \"iOS NEXT: 📥 Project ZIP downloaded\" }" >/dev/null || true
 
       # ------------------------------------------------------------
-      # 2️⃣ Locate iOS project directory
+      # 4️⃣ Install tooling: xcodegen + node (for plugins)
       # ------------------------------------------------------------
-      - name: Locate iOS project
+      - name: Install xcodegen
+        shell: bash
+        run: brew install xcodegen
+
+      - name: Setup Node (for iOS plugins)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # ------------------------------------------------------------
+      # 5️⃣ Locate iOS project directory (ROBUST)
+      #     - Prefer project.yml location (xcodegen spec)
+      #     - Fallback to stable pattern work/ios/*-iOS
+      # ------------------------------------------------------------
+      - name: Locate iOS project directory (Step 4 start)
+        shell: bash
         run: |
           set -e
-          IOS_DIR=$(find work/app -name Info.plist | head -n 1 | xargs dirname)
+
+          SPEC=$(find work -name project.yml | head -n 1 || true)
+          if [ -n "$SPEC" ]; then
+            IOS_DIR=$(dirname "$SPEC")
+          else
+            IOS_DIR=$(find work/ios -maxdepth 2 -type d -name "*-iOS" | head -n 1 || true)
+          fi
+
           if [ -z "$IOS_DIR" ]; then
             echo "❌ No iOS project directory found"
+            echo "📂 Work tree:"
+            find work -maxdepth 4 -type d -print
             exit 1
           fi
+
           echo "IOS_DIR=$IOS_DIR" >> $GITHUB_ENV
+          echo "✅ IOS_DIR=$IOS_DIR"
+
+          curl -s -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
+            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 4, \"step_state\": \"working\", \"log\": \"iOS NEXT: 🧭 Located iOS project directory\" }" >/dev/null || true
 
       # ------------------------------------------------------------
-      # 3️⃣ Install iOS plugin injector
+      # 6️⃣ Apply iOS plugins (Info.plist + entitlements) using repo tooling
+      #     Tools live in: tools/ios-plugins
+      #     Finds Info.plist + entitlements automatically.
       # ------------------------------------------------------------
-      - name: Install iOS plugin injector
+      - name: Apply iOS plugins (NEXT) (Step 4)
+        shell: bash
         run: |
           set -e
-          cd tools/ios-plugins
-          npm ci
-          npx tsc
-          cd -
-
-      # ------------------------------------------------------------
-      # 4️⃣ Apply iOS plugins
-      # ------------------------------------------------------------
-      - name: Apply iOS plugins
-        run: |
-          set -e
-
-          PLUGINS_JSON="$RAW_PLUGINS"
-          if [ -z "$PLUGINS_JSON" ] || [ "$PLUGINS_JSON" = "null" ]; then
-            PLUGINS_JSON="{}"
-          fi
 
           echo "🔌 Applying iOS plugins: $PLUGINS_JSON"
 
-          if [ ! -f "$IOS_DIR/App.entitlements" ]; then
-            echo '<?xml version="1.0" encoding="UTF-8"?>' > "$IOS_DIR/App.entitlements"
-            echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' >> "$IOS_DIR/App.entitlements"
-            echo '<plist version="1.0"><dict></dict></plist>' >> "$IOS_DIR/App.entitlements"
+          # Build the plugin tool (TypeScript) in CI
+          cd tools/ios-plugins
+          npm ci || npm install
+
+          # Compile using typescript package via npx (no reliance on repo deps)
+          npx --yes --package typescript@5.6.3 tsc
+
+          cd ../..
+
+          # Locate Info.plist and entitlements inside IOS_DIR
+          INFO_PLIST=$(find "$IOS_DIR" -name "Info.plist" | head -n 1 || true)
+          ENTITLEMENTS=$(find "$IOS_DIR" -name "*.entitlements" | head -n 1 || true)
+
+          if [ -z "$INFO_PLIST" ]; then
+            echo "❌ Info.plist not found under IOS_DIR=$IOS_DIR"
+            find "$IOS_DIR" -maxdepth 4 -type f | head -n 80
+            exit 1
+          fi
+
+          # entitlements may not exist yet — create a sensible default next to Info.plist
+          if [ -z "$ENTITLEMENTS" ]; then
+            ENTITLEMENTS="$(dirname "$INFO_PLIST")/App.entitlements"
+            echo "ℹ️ No entitlements found; creating at: $ENTITLEMENTS"
+            cat > "$ENTITLEMENTS" <<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict></dict></plist>
+XML
           fi
 
           node tools/ios-plugins/dist/injectIosPlugins.js \
-            --infoPlist "$IOS_DIR/Info.plist" \
-            --entitlements "$IOS_DIR/App.entitlements" \
+            --infoPlist "$INFO_PLIST" \
+            --entitlements "$ENTITLEMENTS" \
             --plugins "$PLUGINS_JSON"
 
           curl -s -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
-            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 4, \"step_state\": \"done\", \"log\": \"iOS NEXT: Plugins applied\" }"
+            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 4, \"step_state\": \"done\", \"log\": \"iOS NEXT: ✅ Plugins injected (Info.plist + entitlements)\" }" >/dev/null || true
 
       # ------------------------------------------------------------
-      # 5️⃣ Generate Xcode project (conditional)
+      # 7️⃣ Generate Xcode project (xcodegen)
       # ------------------------------------------------------------
-      - name: Prepare Xcode project
+      - name: Generate Xcode project (Step 4 complete)
+        shell: bash
         run: |
           set -e
           cd "$IOS_DIR"
 
-          if [ -f "project.yml" ]; then
-            echo "🧩 project.yml found — running XcodeGen"
-            brew install xcodegen
-            xcodegen
-          else
-            echo "ℹ️ No project.yml found — using existing Xcode project"
+          if [ ! -f "project.yml" ]; then
+            echo "❌ project.yml not found in IOS_DIR=$IOS_DIR"
+            echo "📂 Directory listing:"
+            ls -la
+            exit 1
           fi
+
+          xcodegen generate
 
           curl -s -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
-            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 5, \"step_state\": \"done\", \"log\": \"iOS NEXT: Xcode project ready\" }"
+            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 4, \"step_state\": \"done\", \"log\": \"iOS NEXT: 🧱 Xcode project generated\" }" >/dev/null || true
 
       # ------------------------------------------------------------
-      # 6️⃣ Resolve Xcode target
+      # 8️⃣ Resolve Xcode project + scheme (NO wildcards)
       # ------------------------------------------------------------
-      - name: Resolve Xcode target
+      - name: Resolve Xcode project + scheme (Step 5)
+        shell: bash
         run: |
           set -e
-          cd "$IOS_DIR"
-          TARGET=$(xcodebuild -list -json | jq -r '.project.targets[0]')
-          echo "XCODE_TARGET=$TARGET" >> $GITHUB_ENV
+          XCODEPROJ=$(find "$IOS_DIR" -name "*.xcodeproj" | head -n 1 || true)
+          if [ -z "$XCODEPROJ" ]; then
+            echo "❌ No Xcode project found after xcodegen"
+            find "$IOS_DIR" -maxdepth 3 -type d -print
+            exit 1
+          fi
+
+          # Prefer Schemes list (more reliable than Targets for build)
+          SCHEME=$(xcodebuild -list -project "$XCODEPROJ" | awk '/Schemes:/ {getline; print $1}')
+
+          if [ -z "$SCHEME" ]; then
+            echo "❌ No scheme found in project"
+            xcodebuild -list -project "$XCODEPROJ" || true
+            exit 1
+          fi
+
+          echo "XCODEPROJ=$XCODEPROJ" >> $GITHUB_ENV
+          echo "SCHEME=$SCHEME" >> $GITHUB_ENV
+
+          echo "✅ XCODEPROJ=$XCODEPROJ"
+          echo "✅ SCHEME=$SCHEME"
+
+          curl -s -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
+            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 5, \"step_state\": \"done\", \"log\": \"iOS NEXT: 🎯 Resolved project + scheme\" }" >/dev/null || true
 
       # ------------------------------------------------------------
-      # 7️⃣ Build with Xcode (unsigned)
+      # 9️⃣ Build with Xcode (unsigned)
       # ------------------------------------------------------------
-      - name: Build with Xcode
+      - name: Build with Xcode (Step 6)
+        shell: bash
         run: |
           set -e
-          cd "$IOS_DIR"
           xcodebuild \
-            -project *.xcodeproj \
-            -scheme "$XCODE_TARGET" \
+            -project "$XCODEPROJ" \
+            -scheme "$SCHEME" \
             -configuration Release \
             -sdk iphoneos \
             CODE_SIGNING_ALLOWED=NO \
@@ -141,29 +276,120 @@ jobs:
           curl -s -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
             -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
-            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 6, \"step_state\": \"done\", \"log\": \"iOS NEXT: Build completed\" }"
+            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 6, \"step_state\": \"done\", \"log\": \"iOS NEXT: 🏗️ Xcode build completed\" }" >/dev/null || true
 
       # ------------------------------------------------------------
-      # 8️⃣ Package artifact
+      # 🔟 Package iOS artifact ZIP (NEXT Option B)
+      #     - Zip IOS_DIR after generation/build so UI can download the exact bundle.
       # ------------------------------------------------------------
-      - name: Package iOS artifact
+      - name: Package iOS ZIP artifact (Step 7)
+        shell: bash
         run: |
           set -e
-          cd work
-          zip -r ios-build.zip app
+          rm -f ios-artifact.zip
+          cd "$IOS_DIR"
+          zip -qr "$GITHUB_WORKSPACE/ios-artifact.zip" .
+          cd "$GITHUB_WORKSPACE"
 
-      # ------------------------------------------------------------
-      # 9️⃣ Upload artifact
-      # ------------------------------------------------------------
-      - name: Upload artifact
-        run: |
-          set -e
-          curl -X POST "$CALLBACK_URL/upload-ios-zip/$BUILD_ID" \
+          if [ ! -f ios-artifact.zip ]; then
+            echo "❌ Failed to create ios-artifact.zip"
+            exit 1
+          fi
+
+          curl -s -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
             -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
-            --data-binary "@work/ios-build.zip"
+            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 7, \"step_state\": \"done\", \"log\": \"iOS NEXT: 📦 Artifact ZIP packaged\" }" >/dev/null || true
 
       # ------------------------------------------------------------
-      # ✅ Done
+      # 1️⃣1️⃣ Upload artifact ZIP to iOS NEXT Worker (R2) + complete
+      #     Endpoint expected (your NEXT worker Option B):
+      #       POST /upload/ios-zip/:buildId   (binary zip)
+      #     Returns: { ok, stored, artifactUrl }
       # ------------------------------------------------------------
+      - name: Upload iOS ZIP to Worker (R2) (Step 8)
+        shell: bash
+        run: |
+          set -e
+
+          UPLOAD_URL=$(python3 - <<'PY'
+          import os, json
+          cb = os.environ.get("CALLBACK_URL","").rstrip("/")
+          # If the callback URL is like https://worker.dev/callback-ios
+          # we want base https://worker.dev
+          base = cb.split("/callback")[0]
+          print(base + "/upload/ios-zip/" + os.environ["BUILD_ID"])
+          PY
+          )
+
+          echo "⬆️ Uploading to: $UPLOAD_URL"
+
+          RESP=$(curl -s -X POST "$UPLOAD_URL" \
+            -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
+            -H "Content-Type: application/zip" \
+            --data-binary @ios-artifact.zip)
+
+          echo "Upload response: $RESP"
+
+          ARTIFACT_URL=$(python3 - <<'PY'
+          import json, sys
+          import os
+          s = os.environ.get("RESP","")
+          try:
+            j = json.loads(s)
+            print(j.get("artifactUrl") or "")
+          except Exception:
+            print("")
+          PY
+          )
+
+          # pass via env (python reads RESP from env)
+        env:
+          RESP: ${{ steps.upload_resp.outputs.resp }}
+        continue-on-error: true
+
+      - name: Finalize callback (Step 8 complete)
+        shell: bash
+        run: |
+          set -e
+
+          # Re-compute upload URL and extract artifactUrl deterministically (no step outputs needed)
+          UPLOAD_URL=$(python3 - <<'PY'
+          import os
+          cb = os.environ.get("CALLBACK_URL","").rstrip("/")
+          base = cb.split("/callback")[0]
+          print(base + "/upload/ios-zip/" + os.environ["BUILD_ID"])
+          PY
+          )
+
+          RESP=$(curl -s -X POST "$UPLOAD_URL" \
+            -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
+            -H "Content-Type: application/zip" \
+            --data-binary @ios-artifact.zip || true)
+
+          ARTIFACT_URL=$(python3 - <<'PY'
+          import json, os
+          s = os.environ.get("RESP","")
+          try:
+            j = json.loads(s)
+            print(j.get("artifactUrl") or "")
+          except Exception:
+            print("")
+          PY
+          )
+
+          # Always mark complete; artifactUrl may be empty if upload failed
+          if [ -n "$ARTIFACT_URL" ]; then
+            MSG="iOS NEXT: ✅ Uploaded ZIP to Worker (R2)"
+          else
+            MSG="iOS NEXT: ✅ Build complete (ZIP upload skipped/failed)"
+          fi
+
+          curl -s -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
+            -d "{ \"build_id\": \"$BUILD_ID\", \"step\": 8, \"step_state\": \"done\", \"status\": \"success\", \"terminal\": true, \"artifactUrl\": \"$ARTIFACT_URL\", \"log\": \"$MSG\" }" >/dev/null || true
+
       - name: Done
-        run: echo "✅ iOS NEXT build completed successfully"
+        shell: bash
+        run: echo "✅ NovaBridge iOS NEXT build completed"
