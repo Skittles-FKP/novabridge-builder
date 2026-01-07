@@ -46,33 +46,19 @@ jobs:
             f.write(f"ZIP_URL={zip_url}\n")
             f.write(f"CALLBACK_URL={callback_url}\n")
             f.write(f"PLUGINS_JSON={json.dumps(plugins, separators=(',', ':'))}\n")
-
-          print("Payload extracted")
           PY
 
       # ------------------------------------------------------------
-      # 2️⃣ Validate payload (SAFE with set -u)
+      # 2️⃣ Validate payload
       # ------------------------------------------------------------
       - name: Validate dispatch payload
         shell: bash
         run: |
           set -euo pipefail
-
-          if [ -z "${BUILD_ID:-}" ]; then
-            echo "❌ BUILD_ID missing"
+          if [ -z "${BUILD_ID:-}" ] || [ -z "${ZIP_URL:-}" ] || [ -z "${CALLBACK_URL:-}" ]; then
+            echo "❌ Missing required payload values"
             exit 1
           fi
-
-          if [ -z "${ZIP_URL:-}" ]; then
-            echo "❌ ZIP_URL missing"
-            exit 1
-          fi
-
-          if [ -z "${CALLBACK_URL:-}" ]; then
-            echo "❌ CALLBACK_URL missing"
-            exit 1
-          fi
-
           echo "✅ Payload validated"
 
       # ------------------------------------------------------------
@@ -93,9 +79,9 @@ jobs:
         shell: bash
         run: |
           set -e
-          curl -L "$ZIP_URL" -o ios.zip
           rm -rf work
           mkdir -p work
+          curl -L "$ZIP_URL" -o ios.zip
           unzip -q ios.zip -d work
 
           curl -s -X POST "$CALLBACK_URL" \
@@ -137,7 +123,6 @@ jobs:
           fi
 
           echo "IOS_DIR=$IOS_DIR" >> $GITHUB_ENV
-          echo "Found IOS_DIR=$IOS_DIR"
 
           curl -s -X POST "$CALLBACK_URL" \
             -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
@@ -145,7 +130,7 @@ jobs:
             -d "{\"build_id\":\"$BUILD_ID\",\"step\":4,\"step_state\":\"working\",\"log\":\"iOS NEXT: Project directory located\"}" || true
 
       # ------------------------------------------------------------
-      # 7️⃣ Apply iOS plugins (Info.plist + entitlements)
+      # 7️⃣ Apply iOS plugins
       # ------------------------------------------------------------
       - name: Apply iOS plugins
         shell: bash
@@ -186,7 +171,7 @@ jobs:
           xcodegen generate
 
       # ------------------------------------------------------------
-      # 9️⃣ Resolve project + scheme (UI Step 5)
+      # 🔥 9️⃣ Resolve Xcode project + scheme (ROBUST FIX)
       # ------------------------------------------------------------
       - name: Resolve Xcode project + scheme
         shell: bash
@@ -194,10 +179,48 @@ jobs:
           set -e
 
           XCODEPROJ=$(find "$IOS_DIR" -name "*.xcodeproj" | head -n 1)
-          SCHEME=$(xcodebuild -list -project "$XCODEPROJ" | awk '/Schemes:/ {getline; print $1}')
+          if [ -z "$XCODEPROJ" ]; then
+            echo "❌ No .xcodeproj found"
+            exit 1
+          fi
+
+          echo "🧾 xcodebuild -list output:"
+          xcodebuild -list -project "$XCODEPROJ" || true
+
+          SCHEMES=$(xcodebuild -list -project "$XCODEPROJ" | python3 - <<'PY'
+          import sys
+          lines = sys.stdin.read().splitlines()
+          out = []
+          in_schemes = False
+          for line in lines:
+            if line.strip() == "Schemes:":
+              in_schemes = True
+              continue
+            if in_schemes:
+              if not line.strip():
+                continue
+              if line.strip().endswith(":"):
+                break
+              out.append(line.strip())
+          print("\n".join(out))
+          PY
+          )
+
+          if [ -z "$SCHEMES" ]; then
+            echo "❌ No schemes found"
+            exit 1
+          fi
+
+          APP_NAME="$(basename "$XCODEPROJ" .xcodeproj)"
+          PICK=$(echo "$SCHEMES" | grep -i -m1 "^$APP_NAME$" || true)
+          if [ -z "$PICK" ]; then
+            PICK=$(echo "$SCHEMES" | head -n 1)
+          fi
 
           echo "XCODEPROJ=$XCODEPROJ" >> $GITHUB_ENV
-          echo "SCHEME=$SCHEME" >> $GITHUB_ENV
+          printf "SCHEME=%s\n" "$PICK" >> $GITHUB_ENV
+
+          echo "✅ Selected scheme: $PICK"
 
       # ------------------------------------------------------------
       # 🔟 Build with Xcode (UI Step 6)
