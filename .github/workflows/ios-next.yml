@@ -32,16 +32,20 @@ jobs:
           ev = json.load(open(os.environ["GITHUB_EVENT_PATH"], "r"))
           cp = ev.get("client_payload") or {}
 
-          build_id = cp.get("build_id") or cp.get("buildId") or ""
-          zip_url = cp.get("zip_url") or cp.get("zipUrl") or ""
-          callback_url = cp.get("callback_url") or cp.get("callbackUrl") or ""
+          def pick(*keys):
+              for k in keys:
+                  if cp.get(k):
+                      return cp.get(k)
+              return ""
+
+          build_id = pick("build_id","buildId")
+          zip_url = pick("zip_url","zipUrl")
+          callback_url = pick("callback_url","callbackUrl")
 
           plugins = cp.get("plugins") or cp.get("plugins_json") or {}
           if isinstance(plugins, str):
-              try:
-                  plugins = json.loads(plugins)
-              except Exception:
-                  plugins = {}
+              try: plugins = json.loads(plugins)
+              except: plugins = {}
           if not isinstance(plugins, dict):
               plugins = {}
 
@@ -56,19 +60,16 @@ jobs:
       # 3️⃣ Validate payload
       # ------------------------------------------------------------
       - name: Validate dispatch payload
-        shell: bash
         run: |
           set -e
-          [ -n "$BUILD_ID" ] || (echo "❌ BUILD_ID missing" && exit 1)
-          [ -n "$ZIP_URL" ] || (echo "❌ ZIP_URL missing" && exit 1)
-          [ -n "$CALLBACK_URL" ] || (echo "❌ CALLBACK_URL missing" && exit 1)
-          echo "✅ Payload validated"
+          [ -n "$BUILD_ID" ] || exit 1
+          [ -n "$ZIP_URL" ] || exit 1
+          [ -n "$CALLBACK_URL" ] || exit 1
 
       # ------------------------------------------------------------
       # 4️⃣ Download iOS ZIP
       # ------------------------------------------------------------
       - name: Download iOS ZIP
-        shell: bash
         run: |
           set -e
           rm -rf work
@@ -77,7 +78,7 @@ jobs:
           unzip -q ios.zip -d work
 
       # ------------------------------------------------------------
-      # 5️⃣ Install tooling
+      # 5️⃣ Tooling
       # ------------------------------------------------------------
       - name: Install xcodegen
         run: brew install xcodegen
@@ -88,31 +89,21 @@ jobs:
           node-version: "22"
 
       # ------------------------------------------------------------
-      # 6️⃣ Locate project.yml → IOS_DIR
+      # 6️⃣ Locate project.yml
       # ------------------------------------------------------------
       - name: Locate iOS project directory
-        shell: bash
         run: |
           set -e
-          SPEC=$(find work -type f -name "project.yml" | head -n 1 || true)
-          if [ -z "$SPEC" ]; then
-            echo "❌ project.yml not found"
-            exit 1
-          fi
+          SPEC=$(find work -type f -name "project.yml" | head -n 1)
           IOS_DIR="$(dirname "$SPEC")"
           echo "IOS_DIR=$IOS_DIR" >> "$GITHUB_ENV"
-          echo "📁 IOS_DIR=$IOS_DIR"
 
       # ------------------------------------------------------------
-      # 7️⃣ Apply iOS plugins (FINAL FIX)
+      # 7️⃣ Apply iOS plugins
       # ------------------------------------------------------------
       - name: Apply iOS plugins
-        shell: bash
         run: |
           set -e
-          echo "🔌 Applying iOS plugins JSON:"
-          echo "$PLUGINS_JSON"
-
           cd tools/ios-plugins
           npm ci || npm install
           ./node_modules/.bin/tsc
@@ -141,19 +132,43 @@ jobs:
           xcodegen generate
 
       # ------------------------------------------------------------
-      # 9️⃣ Resolve scheme
+      # 9️⃣ Resolve scheme (FULL NAME, SPACES SAFE)
       # ------------------------------------------------------------
       - name: Resolve scheme
         shell: bash
         run: |
           set -e
+
           XCODEPROJ=$(find "$IOS_DIR" -type d -name "*.xcodeproj" | head -n 1)
-          SCHEME=$(xcodebuild -list -project "$XCODEPROJ" | awk '/Schemes:/ {getline; print $1}')
+
+          echo "🧾 xcodebuild -list:"
+          xcodebuild -list -project "$XCODEPROJ"
+
+          SCHEME=$(xcodebuild -list -project "$XCODEPROJ" | python3 - <<'PY'
+          import sys
+          lines=sys.stdin.read().splitlines()
+          grab=False
+          for l in lines:
+              if l.strip()=="Schemes:":
+                  grab=True
+                  continue
+              if grab:
+                  if not l.startswith(" "): break
+                  s=l.strip()
+                  if s:
+                      print(s)
+                      break
+          PY
+          )
+
+          [ -n "$SCHEME" ] || (echo "❌ No scheme found" && exit 1)
+
           echo "XCODEPROJ=$XCODEPROJ" >> "$GITHUB_ENV"
           echo "SCHEME=$SCHEME" >> "$GITHUB_ENV"
+          echo "✅ Using scheme: $SCHEME"
 
       # ------------------------------------------------------------
-      # 🔟 Build with Xcode
+      # 🔟 Build with Xcode (SCHEME FIXED)
       # ------------------------------------------------------------
       - name: Build with Xcode
         run: |
@@ -167,7 +182,7 @@ jobs:
             build
 
       # ------------------------------------------------------------
-      # 1️⃣1️⃣ Package ZIP artifact
+      # 1️⃣1️⃣ Package ZIP
       # ------------------------------------------------------------
       - name: Package artifact
         run: |
@@ -185,7 +200,7 @@ jobs:
           path: ios-build-${{ env.BUILD_ID }}.zip
 
       # ------------------------------------------------------------
-      # 1️⃣3️⃣ Notify Worker (terminal)
+      # 1️⃣3️⃣ Notify Worker
       # ------------------------------------------------------------
       - name: Notify Worker
         run: |
