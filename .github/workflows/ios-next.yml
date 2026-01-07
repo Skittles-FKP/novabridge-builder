@@ -62,9 +62,9 @@ jobs:
       - name: Validate dispatch payload
         run: |
           set -e
-          [ -n "$BUILD_ID" ] || exit 1
-          [ -n "$ZIP_URL" ] || exit 1
-          [ -n "$CALLBACK_URL" ] || exit 1
+          [ -n "$BUILD_ID" ] || (echo "Missing BUILD_ID" && exit 1)
+          [ -n "$ZIP_URL" ] || (echo "Missing ZIP_URL" && exit 1)
+          [ -n "$CALLBACK_URL" ] || (echo "Missing CALLBACK_URL" && exit 1)
 
       # ------------------------------------------------------------
       # 4️⃣ Download iOS ZIP
@@ -95,23 +95,29 @@ jobs:
         run: |
           set -e
           SPEC=$(find work -type f -name "project.yml" | head -n 1)
+          [ -n "$SPEC" ] || (echo "❌ No project.yml found" && exit 1)
           IOS_DIR="$(dirname "$SPEC")"
           echo "IOS_DIR=$IOS_DIR" >> "$GITHUB_ENV"
+          echo "✅ IOS_DIR=$IOS_DIR"
 
       # ------------------------------------------------------------
-      # 7️⃣ Apply iOS plugins
+      # 7️⃣ Apply iOS plugins (Info.plist + entitlements)
       # ------------------------------------------------------------
       - name: Apply iOS plugins
         run: |
           set -e
+          echo "🔌 Applying iOS plugins JSON:"
+          echo "$PLUGINS_JSON"
+
           cd tools/ios-plugins
           npm ci || npm install
           ./node_modules/.bin/tsc
           cd ../..
 
           INFO_PLIST=$(find "$IOS_DIR" -type f -name "Info.plist" | head -n 1)
-          ENTITLEMENTS=$(find "$IOS_DIR" -type f -name "*.entitlements" | head -n 1 || true)
+          [ -n "$INFO_PLIST" ] || (echo "❌ Info.plist not found" && exit 1)
 
+          ENTITLEMENTS=$(find "$IOS_DIR" -type f -name "*.entitlements" | head -n 1 || true)
           if [ -z "$ENTITLEMENTS" ]; then
             ENTITLEMENTS="$(dirname "$INFO_PLIST")/App.entitlements"
             echo '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict/></plist>' > "$ENTITLEMENTS"
@@ -132,7 +138,7 @@ jobs:
           xcodegen generate
 
       # ------------------------------------------------------------
-      # 9️⃣ Resolve scheme (FIXED — indentation safe + fallback)
+      # 9️⃣ Resolve scheme (indentation-safe + fallback)
       # ------------------------------------------------------------
       - name: Resolve scheme
         shell: bash
@@ -140,6 +146,7 @@ jobs:
           set -e
 
           XCODEPROJ=$(find "$IOS_DIR" -type d -name "*.xcodeproj" | head -n 1)
+          [ -n "$XCODEPROJ" ] || (echo "❌ No .xcodeproj found after xcodegen" && exit 1)
 
           echo "🧾 xcodebuild -list:"
           LIST="$(xcodebuild -list -project "$XCODEPROJ")"
@@ -147,10 +154,8 @@ jobs:
 
           SCHEME=$(python3 - <<'PY'
           import sys
-
           text = sys.stdin.read().splitlines()
           grab = False
-
           for line in text:
               if line.strip() == "Schemes:":
                   grab = True
@@ -187,7 +192,7 @@ jobs:
             build
 
       # ------------------------------------------------------------
-      # 1️⃣1️⃣ Package ZIP
+      # 1️⃣1️⃣ Package ZIP artifact
       # ------------------------------------------------------------
       - name: Package artifact
         run: |
@@ -196,20 +201,41 @@ jobs:
           zip -qr "$GITHUB_WORKSPACE/ios-build-${BUILD_ID}.zip" .
 
       # ------------------------------------------------------------
-      # 1️⃣2️⃣ Upload artifact
+      # 1️⃣2️⃣ Upload artifact to GitHub (kept for debugging)
       # ------------------------------------------------------------
-      - name: Upload artifact
+      - name: Upload artifact to GitHub
         uses: actions/upload-artifact@v4
         with:
           name: ios-next-${{ env.BUILD_ID }}
           path: ios-build-${{ env.BUILD_ID }}.zip
 
       # ------------------------------------------------------------
-      # 1️⃣3️⃣ Notify Worker
+      # 1️⃣3️⃣ Upload ZIP to Worker R2 (this powers UI download)
+      # ------------------------------------------------------------
+      - name: Upload ZIP to Worker (R2)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # CALLBACK_URL is like: https://<worker>/callback-ios
+          WORKER_BASE="${CALLBACK_URL%/callback-ios}"
+          WORKER_BASE="${WORKER_BASE%/}"  # trim trailing slash if any
+
+          echo "✅ WORKER_BASE=$WORKER_BASE"
+          echo "⬆️ Uploading ZIP to: $WORKER_BASE/upload-artifact-ios/$BUILD_ID"
+
+          curl -sS -X PUT "$WORKER_BASE/upload-artifact-ios/$BUILD_ID" \
+            -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
+            -H "Content-Type: application/zip" \
+            --data-binary "@ios-build-${BUILD_ID}.zip"
+
+      # ------------------------------------------------------------
+      # 1️⃣4️⃣ Notify Worker (terminal flip; safe if already terminal)
       # ------------------------------------------------------------
       - name: Notify Worker
         run: |
-          curl -X POST "$CALLBACK_URL" \
+          set -e
+          curl -sS -X POST "$CALLBACK_URL" \
             -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
             -H "Content-Type: application/json" \
             -d "{\"build_id\":\"$BUILD_ID\",\"status\":\"success\",\"terminal\":true}"
