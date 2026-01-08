@@ -22,43 +22,35 @@ jobs:
         uses: actions/checkout@v4
 
       # ------------------------------------------------------------
-      # 2️⃣ Extract & sanitize dispatch payload
+      # 2️⃣ Extract dispatch payload
       # ------------------------------------------------------------
       - name: Extract dispatch payload
         shell: bash
         run: |
           set -euo pipefail
-
           python3 - <<'PY'
           import json, os
-
-          ev = json.load(open(os.environ["GITHUB_EVENT_PATH"], "r"))
+          ev = json.load(open(os.environ["GITHUB_EVENT_PATH"]))
           cp = ev.get("client_payload") or {}
 
-          def pick(*keys):
-              for k in keys:
-                  if cp.get(k):
-                      return cp.get(k)
+          def pick(*k):
+              for x in k:
+                  if cp.get(x):
+                      return cp.get(x)
               return ""
 
-          build_id = pick("build_id", "buildId")
-          zip_url = pick("zip_url", "zipUrl")
-          callback_url = pick("callback_url", "callbackUrl")
+          build_id = pick("build_id","buildId")
+          zip_url  = pick("zip_url","zipUrl")
+          plugins  = cp.get("plugins") or {}
 
-          plugins = cp.get("plugins") or {}
           if isinstance(plugins, str):
-              try:
-                  plugins = json.loads(plugins)
-              except:
-                  plugins = {}
-          if not isinstance(plugins, dict):
-              plugins = {}
+              try: plugins = json.loads(plugins)
+              except: plugins = {}
 
           with open(os.environ["GITHUB_ENV"], "a") as f:
               f.write(f"BUILD_ID={build_id}\n")
               f.write(f"ZIP_URL={zip_url}\n")
-              f.write(f"CALLBACK_URL={callback_url}\n")
-              f.write(f"PLUGINS_JSON={json.dumps(plugins, separators=(',', ':'))}\n")
+              f.write(f"PLUGINS_JSON={json.dumps(plugins)}\n")
           PY
 
       # ------------------------------------------------------------
@@ -71,15 +63,13 @@ jobs:
           [ -n "$ZIP_URL" ]
 
       # ------------------------------------------------------------
-      # 4️⃣ Download iOS ZIP from Worker
+      # 4️⃣ Download iOS ZIP
       # ------------------------------------------------------------
       - name: Download iOS ZIP
         run: |
           set -e
           rm -rf work
-          mkdir -p work
-          echo "⬇️ Downloading iOS ZIP:"
-          echo "$ZIP_URL"
+          mkdir work
           curl -fL "$ZIP_URL" -o ios.zip
           unzip -q ios.zip -d work
 
@@ -100,33 +90,28 @@ jobs:
       - name: Locate iOS project directory
         run: |
           set -e
-          SPEC=$(find work -type f -name "project.yml" | head -n 1)
+          SPEC=$(find work -name project.yml | head -n 1)
           [ -n "$SPEC" ]
           IOS_DIR="$(dirname "$SPEC")"
-          echo "IOS_DIR=$IOS_DIR" >> "$GITHUB_ENV"
+          echo "IOS_DIR=$IOS_DIR" >> $GITHUB_ENV
 
       # ------------------------------------------------------------
-      # 7️⃣ Apply iOS plugins (Info.plist + entitlements)
+      # 7️⃣ Apply iOS plugins
       # ------------------------------------------------------------
       - name: Apply iOS plugins
         run: |
           set -e
-
-          echo "🔌 Applying iOS plugins JSON:"
-          echo "$PLUGINS_JSON"
-
           cd tools/ios-plugins
           npm ci || npm install
           npx tsc
           cd ../..
 
-          INFO_PLIST=$(find "$IOS_DIR" -type f -name "Info.plist" | head -n 1)
-          [ -n "$INFO_PLIST" ]
+          INFO_PLIST=$(find "$IOS_DIR" -name Info.plist | head -n 1)
+          ENTITLEMENTS=$(find "$IOS_DIR" -name "*.entitlements" | head -n 1 || true)
 
-          ENTITLEMENTS=$(find "$IOS_DIR" -type f -name "*.entitlements" | head -n 1 || true)
           if [ -z "$ENTITLEMENTS" ]; then
             ENTITLEMENTS="$(dirname "$INFO_PLIST")/App.entitlements"
-            echo '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict/></plist>' > "$ENTITLEMENTS"
+            echo '<?xml version="1.0"?><plist version="1.0"><dict/></plist>' > "$ENTITLEMENTS"
           fi
 
           node tools/ios-plugins/dist/injectIosPlugins.js \
@@ -144,41 +129,29 @@ jobs:
           xcodegen generate
 
       # ------------------------------------------------------------
-      # 9️⃣ Resolve scheme safely
+      # 9️⃣ Resolve scheme (FIXED — SAFE)
       # ------------------------------------------------------------
       - name: Resolve Xcode scheme
-        shell: bash
         run: |
           set -e
 
-          XCODEPROJ=$(find "$IOS_DIR" -type d -name "*.xcodeproj" | head -n 1)
+          XCODEPROJ=$(find "$IOS_DIR" -name "*.xcodeproj" | head -n 1)
           [ -n "$XCODEPROJ" ]
 
           echo "🧾 xcodebuild -list:"
-          xcodebuild -list -project "$XCODEPROJ"
+          xcodebuild -list -project "$XCODEPROJ" || true
 
-          SCHEME=$(xcodebuild -list -project "$XCODEPROJ" | python3 - <<'PY'
-          import sys
-          lines = sys.stdin.read().splitlines()
-          grab = False
-          for l in lines:
-              if l.strip() == "Schemes:":
-                  grab = True
-                  continue
-              if grab:
-                  if not l.startswith(" "):
-                      break
-                  s = l.strip()
-                  if s:
-                      print(s)
-                      break
-          PY
-          )
+          SCHEME=$(xcodebuild -list -project "$XCODEPROJ" \
+            | awk '/Schemes:/ {f=1; next} f && NF {print; exit}' \
+            | sed 's/^[[:space:]]*//')
 
-          [ -n "$SCHEME" ]
+          if [ -z "$SCHEME" ]; then
+            echo "❌ No scheme detected"
+            exit 1
+          fi
 
-          echo "XCODEPROJ=$XCODEPROJ" >> "$GITHUB_ENV"
-          echo "SCHEME=$SCHEME" >> "$GITHUB_ENV"
+          echo "XCODEPROJ=$XCODEPROJ" >> $GITHUB_ENV
+          echo "SCHEME=$SCHEME" >> $GITHUB_ENV
           echo "✅ Using scheme: $SCHEME"
 
       # ------------------------------------------------------------
@@ -196,32 +169,23 @@ jobs:
             build
 
       # ------------------------------------------------------------
-      # 1️⃣1️⃣ Package iOS artifact ZIP
+      # 1️⃣1️⃣ Package ZIP
       # ------------------------------------------------------------
-      - name: Package iOS artifact
+      - name: Package artifact
         run: |
           set -e
           cd "$IOS_DIR"
           zip -qr "$GITHUB_WORKSPACE/ios-build-${BUILD_ID}.zip" .
 
       # ------------------------------------------------------------
-      # 1️⃣2️⃣ Upload artifact to iOS NEXT Worker (THIS IS THE FIX)
+      # 1️⃣2️⃣ Upload artifact to Worker (TERMINAL FLIP)
       # ------------------------------------------------------------
       - name: Upload artifact to iOS NEXT Worker
         run: |
           set -e
-
-          ZIP_PATH="ios-build-${BUILD_ID}.zip"
-
-          echo "⬆️ Uploading ZIP to iOS NEXT Worker:"
-          echo "$WORKER_BASE/upload-artifact-ios/$BUILD_ID"
-
           curl -f -X PUT "$WORKER_BASE/upload-artifact-ios/$BUILD_ID" \
             -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
-            --data-binary "@$ZIP_PATH"
+            --data-binary "@ios-build-${BUILD_ID}.zip"
 
-      # ------------------------------------------------------------
-      # 1️⃣3️⃣ Done
-      # ------------------------------------------------------------
       - name: Done
         run: echo "✅ iOS NEXT build completed successfully"
