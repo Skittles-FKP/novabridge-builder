@@ -186,6 +186,23 @@ jobs:
           curl -f -X PUT "$WORKER_BASE/upload-artifact-ios/$BUILD_ID" \
             -H "x-novabridge-token: ${{ secrets.CALLBACK_TOKEN }}" \
             --data-binary "@ios-build-${BUILD_ID}.zip"
+        
+      # ------------------------------------------------------------
+      # 🔟 Upload artifact to iOS NEXT Worker (R2 + terminal flip)
+      # ------------------------------------------------------------
+      - name: Upload artifact to iOS NEXT Worker
+        env:
+          CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
+        run: |
+          set -e
+          WORKER_BASE="https://novabridge-ios-build-worker-next.novabridge.workers.dev"
+          FILE="ios-build-${BUILD_ID}.zip"
+
+          echo "⬆️ Uploading iOS ZIP to Worker..."
+          curl -f -X PUT "$WORKER_BASE/upload-artifact-ios/$BUILD_ID" \
+            -H "x-novabridge-token: $CALLBACK_TOKEN" \
+            -H "Content-Type: application/zip" \
+            --data-binary "@$FILE"
 
       - name: Done
         run: echo "✅ iOS NEXT build completed successfully"
